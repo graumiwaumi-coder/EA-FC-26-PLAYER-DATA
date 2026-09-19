@@ -419,13 +419,15 @@ NUMERIC_FEATURES = [
 CATEGORICAL_FEATURES = ["platform", "position", "position_group", "league", "nation", "foot", "body_type", "is_icon"]
 ALL_FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
-player_cols = ["id"] + [c for c in CATEGORICAL_FEATURES if c != "platform"] + \\
-    ["skills", "weak_foot", "height_cm", "age", "n_playstyles",
-     "league_price_score", "league_liquidity_score", "club_price_score",
-     "club_liquidity_score", "nation_price_score", "nation_liquidity_score"]
+PLAYER_LEVEL_NUMERIC = ["skills", "weak_foot", "height_cm", "age", "n_playstyles",
+                        "league_price_score", "league_liquidity_score", "club_price_score",
+                        "club_liquidity_score", "nation_price_score", "nation_liquidity_score"]
+player_cols = ["id"] + [c for c in CATEGORICAL_FEATURES if c != "platform"] + PLAYER_LEVEL_NUMERIC
 players_sub = players[players["rating"] >= MIN_RATING][player_cols]
 
-price_cols = [c for c in NUMERIC_FEATURES if c != "rating"] + \\
+# only columns that actually live in prices_features.parquet -- player-level columns
+# (skills, league_price_score, etc.) come from players_sub via the merge below instead
+price_cols = [c for c in NUMERIC_FEATURES if c != "rating" and c not in PLAYER_LEVEL_NUMERIC] + \\
     ["player_id", "platform", "date", "rating", f"fwd_return_{HORIZON}d_net_tax", f"fwd_up_{HORIZON}d_net_tax"]
 price_cols = list(dict.fromkeys(price_cols))
 
@@ -574,7 +576,7 @@ BUDGET_TIERS = [("small (<=200k)", 0, 200_000), ("medium (200k-1M)", 200_000, 1_
 latest_date = dataset2.to_table(columns=["date"]).to_pandas()["date"].max()
 print(f"Using latest date: {latest_date.date()}")
 
-pick_price_native = [c for c in NUMERIC_FEATURES if c != "rating"]
+pick_price_native = [c for c in NUMERIC_FEATURES if c != "rating" and c not in PLAYER_LEVEL_NUMERIC]
 pick_cols = list(dict.fromkeys(pick_price_native + ["player_id", "date", "price_clean", "platform", "rating"]))
 filt = (ds.field("rating") >= MIN_RATING) & (ds.field("date") == pd.Timestamp(latest_date)) & (ds.field("platform") == "pc")
 today = dataset2.to_table(columns=pick_cols, filter=filt).to_pandas()
