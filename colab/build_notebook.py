@@ -40,6 +40,7 @@ code("""
 import warnings
 warnings.filterwarnings("ignore")
 
+import gc
 import json
 import re
 from pathlib import Path
@@ -202,6 +203,13 @@ players_df.to_parquet(DATA_DIR / "players.parquet", index=False)
 prices_df.to_parquet(DATA_DIR / "prices_long.parquet", index=False)
 print(f"\\nParsed {n_lines} players -> players.parquet ({len(players_df)} rows), "
       f"prices_long.parquet ({len(prices_df)} rows)")
+
+# free the raw parsing lists -- these are large (millions of Python tuples) and are
+# no longer needed now that the data is saved; keeping the whole pipeline in one
+# continuous notebook session (unlike separate scripts) means memory doesn't get
+# freed automatically between steps, so we free it explicitly to avoid running out.
+del player_rows, price_rows
+gc.collect()
 """)
 
 # ---------------------------------------------------------------------------
@@ -238,6 +246,9 @@ for col in ("league", "club", "nation"):
 
 players.to_parquet(DATA_DIR / "players_features.parquet", index=False)
 print(f"players_features.parquet: {len(players)} rows, {len(players.columns)} columns")
+
+del players_df, pc, per_player, agg
+gc.collect()
 """)
 
 code("""
@@ -287,6 +298,8 @@ def rsi(price, window=14):
 
 
 prices = prices_df.sort_values(["player_id", "platform", "date"]).reset_index(drop=True)
+del prices_df
+gc.collect()
 prices["price_clean"] = prices["price"].where(prices["price"] >= MIN_TRADEABLE_PRICE)
 g = prices.groupby(["player_id", "platform"], sort=False)["price_clean"]
 
@@ -324,6 +337,8 @@ pivot = pivot.rename(columns={"pc": "pc_price_same_day", "console": "console_pri
 mom = prices.pivot_table(index=["player_id", "date"], columns="platform", values="pct_change_7d")
 mom = mom.rename(columns={"pc": "pc_pct_change_7d_x", "console": "console_pct_change_7d_x"}).reset_index()
 prices = prices.merge(pivot, on=["player_id", "date"], how="left").merge(mom, on=["player_id", "date"], how="left")
+del pivot, mom
+gc.collect()
 is_pc = prices["platform"] == "pc"
 prices["other_platform_price"] = np.where(is_pc, prices["console_price_same_day"], prices["pc_price_same_day"])
 prices["other_platform_pct_change_7d"] = np.where(is_pc, prices["console_pct_change_7d_x"], prices["pc_pct_change_7d_x"])
@@ -361,7 +376,8 @@ prices["days_since_start"] = (prices["date"] - prices["date"].min()).dt.days
 
 prices.to_parquet(DATA_DIR / "prices_features.parquet", index=False)
 print(f"prices_features.parquet: {len(prices)} rows, {len(prices.columns)} columns")
-del prices, pivot, mom  # free memory before modeling
+del prices  # free memory before modeling -- Step 5+ reload only what they need from disk
+gc.collect()
 """)
 
 # ---------------------------------------------------------------------------
