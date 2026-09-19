@@ -52,6 +52,19 @@ import joblib
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.metrics import roc_auc_score, accuracy_score
 
+def free_memory():
+    # gc.collect() alone often doesn't return freed memory to the OS in a long-running
+    # process (glibc keeps it for reuse) -- malloc_trim forces an actual release, which
+    # matters here since this notebook runs everything in one continuous session instead
+    # of separate scripts that would each exit and free everything automatically.
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 ROOT = Path("/content")
 DATA_DIR = ROOT / "data"
 MODEL_DIR = DATA_DIR / "models"
@@ -209,7 +222,7 @@ print(f"\\nParsed {n_lines} players -> players.parquet ({len(players_df)} rows),
 # continuous notebook session (unlike separate scripts) means memory doesn't get
 # freed automatically between steps, so we free it explicitly to avoid running out.
 del player_rows, price_rows
-gc.collect()
+free_memory()
 """)
 
 # ---------------------------------------------------------------------------
@@ -248,7 +261,7 @@ players.to_parquet(DATA_DIR / "players_features.parquet", index=False)
 print(f"players_features.parquet: {len(players)} rows, {len(players.columns)} columns")
 
 del players_df, pc, per_player, agg
-gc.collect()
+free_memory()
 """)
 
 code("""
@@ -299,8 +312,10 @@ def rsi(price, window=14):
 
 prices = prices_df.sort_values(["player_id", "platform", "date"]).reset_index(drop=True)
 del prices_df
-gc.collect()
-prices["price_clean"] = prices["price"].where(prices["price"] >= MIN_TRADEABLE_PRICE)
+free_memory()
+prices["price_clean"] = (prices["price"].where(prices["price"] >= MIN_TRADEABLE_PRICE)).astype("float32")
+# downcast early (not just at the end) -- this table has 16.8M rows and ~50 numeric
+# columns, so computing everything at float64 roughly doubles peak memory for no benefit
 g = prices.groupby(["player_id", "platform"], sort=False)["price_clean"]
 
 for w in (3, 7, 14, 30, 60, 90):
@@ -327,6 +342,9 @@ prices["tradeable"] = (prices["price"] > 0).astype(float)
 prices["liquidity_14"] = prices.groupby(["player_id", "platform"], sort=False)["tradeable"].transform(lambda s: s.rolling(14, min_periods=5).mean())
 prices["bollinger_z_30"] = (prices["price_clean"] - prices["ma_30"]) / prices["std_30"]
 
+_float_cols = prices.select_dtypes(include=["float64"]).columns
+prices[_float_cols] = prices[_float_cols].astype("float32")
+free_memory()
 print("Base technical features done. Adding cross-platform + index context + forward returns...")
 """)
 
@@ -338,7 +356,7 @@ mom = prices.pivot_table(index=["player_id", "date"], columns="platform", values
 mom = mom.rename(columns={"pc": "pc_pct_change_7d_x", "console": "console_pct_change_7d_x"}).reset_index()
 prices = prices.merge(pivot, on=["player_id", "date"], how="left").merge(mom, on=["player_id", "date"], how="left")
 del pivot, mom
-gc.collect()
+free_memory()
 is_pc = prices["platform"] == "pc"
 prices["other_platform_price"] = np.where(is_pc, prices["console_price_same_day"], prices["pc_price_same_day"])
 prices["other_platform_pct_change_7d"] = np.where(is_pc, prices["console_pct_change_7d_x"], prices["pc_pct_change_7d_x"])
@@ -377,7 +395,7 @@ prices["days_since_start"] = (prices["date"] - prices["date"].min()).dt.days
 prices.to_parquet(DATA_DIR / "prices_features.parquet", index=False)
 print(f"prices_features.parquet: {len(prices)} rows, {len(prices.columns)} columns")
 del prices  # free memory before modeling -- Step 5+ reload only what they need from disk
-gc.collect()
+free_memory()
 """)
 
 # ---------------------------------------------------------------------------
@@ -488,6 +506,11 @@ for i in range(len(fold_edges) - 1):
           f"| n_train={train_mask.sum()} n_test={test_mask.sum()} "
           f"| AUC={auc:.3f} | confident(>=0.5) n={mask_conf.sum()} win_rate={win_rate:.1%} median_return={med_ret:.1%}")
     fold_results.append({"fold": i+1, "auc": auc, "win_rate": win_rate, "median_return": med_ret, "n_confident": mask_conf.sum()})
+
+    # free each fold's data/model before the next iteration -- otherwise 4 folds'
+    # worth of train/test copies and fitted models stay resident simultaneously
+    del X_train, y_train, X_test, y_test, y_test_reg, clf, proba, mask_conf
+    free_memory()
 
 fold_df = pd.DataFrame(fold_results)
 print("\\n=== Summary across folds ===")
