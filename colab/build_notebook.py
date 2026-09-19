@@ -523,23 +523,34 @@ print("it may be tied to a specific period's market conditions rather than a sta
 """)
 
 code("""
-# train the FINAL production model on ALL available data (for making live predictions)
+# train the FINAL production model on ALL available data (for making live predictions).
+# Free memory before AND between the two fits -- fitting two large boosted models
+# back-to-back without releasing the first's internal buffers was the last OOM point.
+free_memory()
+
 X_all = df[ALL_FEATURES]
 y_all_clf = df[target_clf].astype(int)
-y_all_reg = df[target_reg]
 
 clf_final = HistGradientBoostingClassifier(categorical_features=cat_idx, max_iter=300, learning_rate=0.05,
                                             early_stopping=True, validation_fraction=0.15, random_state=42)
 clf_final.fit(X_all, y_all_clf)
+joblib.dump(clf_final, MODEL_DIR / f"clf_{HORIZON}d.joblib")
+print("Classifier trained and saved.")
 
+del y_all_clf
+free_memory()
+
+y_all_reg = df[target_reg]
 reg_final = HistGradientBoostingRegressor(categorical_features=cat_idx, max_iter=300, learning_rate=0.05,
                                            early_stopping=True, validation_fraction=0.15, random_state=42)
 reg_final.fit(X_all, y_all_reg)
-
-joblib.dump(clf_final, MODEL_DIR / f"clf_{HORIZON}d.joblib")
 joblib.dump(reg_final, MODEL_DIR / f"reg_{HORIZON}d.joblib")
+print("Regressor trained and saved.")
+
 joblib.dump(ALL_FEATURES, MODEL_DIR / "feature_list.joblib")
-print("Final production model trained on all available data and saved.")
+del X_all, y_all_reg
+free_memory()
+print("Final production models trained on all available data and saved.")
 """)
 
 # ---------------------------------------------------------------------------
