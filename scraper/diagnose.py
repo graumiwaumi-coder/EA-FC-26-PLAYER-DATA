@@ -43,7 +43,24 @@ async def main():
 
     print(f"Loading {URL} ...")
     await tab.get(URL)
-    await asyncio.sleep(8)  # generous fixed wait, no polling, so we see the actual state
+
+    # poll for the Cloudflare "Just a moment..." challenge to clear, the same way the
+    # existing working player-page scraper polls for real content up to 20s, instead
+    # of guessing a fixed wait is enough
+    max_wait = 25
+    elapsed = 0.0
+    while elapsed < max_wait:
+        title = await tab.evaluate("document.title")
+        if isinstance(title, dict):
+            title = title.get("value", "")
+        print(f"  [{elapsed:.1f}s] title={title!r}")
+        if title and "just a moment" not in title.lower():
+            print(f"  Challenge cleared after {elapsed:.1f}s")
+            break
+        await asyncio.sleep(1.0)
+        elapsed += 1.0
+    else:
+        print(f"  Still on challenge page after {max_wait}s")
 
     info = await tab.evaluate("""
     (() => {
