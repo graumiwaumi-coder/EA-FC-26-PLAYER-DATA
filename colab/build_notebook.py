@@ -65,6 +65,8 @@ def free_memory():
         pass
 
 
+MIN_RATING = 75  # your stated trading focus: gold and above
+
 ROOT = Path("/content")
 DATA_DIR = ROOT / "data"
 MODEL_DIR = DATA_DIR / "models"
@@ -227,10 +229,11 @@ free_memory()
 
 # ---------------------------------------------------------------------------
 md("## Step 4: Engineer features\n\n"
-   "Player-level demand proxies, market index momentum, and the full technical "
-   "feature set (moving averages, RSI, volatility, cross-platform ratios, index-relative "
-   "z-scores, multi-horizon forward returns). This is the slowest step -- it processes "
-   "the full price history for every player on both platforms.")
+   "Player-level demand proxies (computed from the FULL ~28k-player pool) and market "
+   "index momentum, then the full technical feature set (moving averages, RSI, volatility, "
+   "cross-platform ratios, index-relative z-scores, multi-horizon forward returns) -- this "
+   "last part is restricted to Gold+ (rating>=75) players, since that's your stated trading "
+   "focus and every later step only uses Gold+ anyway. This is the slowest step.")
 
 code("""
 # --- player-level features ---
@@ -295,6 +298,21 @@ print(f"indices_features.parquet: {len(idx)} rows, macro_wide.parquet: {len(macr
 
 code("""
 # --- full price/technical feature set ---
+# Restricted to Gold+ (rating>=75) from here on. Every downstream step (model
+# training, strategy analysis, today's picks, the bankroll simulation) only ever
+# uses Gold+ players anyway, matching your stated trading focus -- and computing
+# the heaviest feature-engineering step across the full ~28k-player pool (including
+# ~21k sub-75-rated fodder cards nobody here trades) was pushing memory past what
+# this notebook can reliably run within on Colab's free tier. players_features.parquet
+# still covers the full pool; only the expensive price-history features are scoped down.
+_gold_ids = players.loc[players["rating"] >= MIN_RATING, "id"]
+_n_before, _n_players_before = len(prices_df), prices_df["player_id"].nunique()
+prices_df = prices_df[prices_df["player_id"].isin(_gold_ids)].copy()
+print(f"Restricting price-feature computation to rating>={MIN_RATING}: "
+      f"{prices_df['player_id'].nunique()} players / {len(prices_df)} rows "
+      f"(full pool was {_n_players_before} players / {_n_before} rows)")
+free_memory()
+
 MIN_TRADEABLE_PRICE = 1
 SELL_TAX = 0.05
 FORWARD_HORIZONS = (7, 14, 21, 30)
@@ -408,7 +426,6 @@ md("## Step 5: Train + validate with MULTIPLE walk-forward folds\n\n"
    "fluke of one lucky window.")
 
 code("""
-MIN_RATING = 75
 HORIZON = 21
 EMBARGO_DAYS = HORIZON
 
