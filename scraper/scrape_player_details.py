@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Per-player detail scraper: sales history + daily/live sale-price charts for
-every player discovered by scrape_market_list.py, plus the FC27 Popular
-players list (https://www.futbin.com/27/popular) for anything not already
-covered by a market-list price bucket or squad.
+Per-player sales-history + daily/live sale-price chart scraper for every
+player discovered by scrape_market_list.py, plus the FC27 Popular players
+list (https://www.futbin.com/27/popular) for anything not already covered
+by a market-list price bucket or squad.
+
+(Meta + full price-history + current price live on the player's own page --
+that's scrape_player_history.py, run separately. This script is purely the
+/27/sales/ page: sales-history table + daily/live chart high/low/avg.)
 
 Confirmed page structure (inspected directly in DevTools, 2026-09):
 
@@ -20,17 +24,6 @@ Confirmed page structure (inspected directly in DevTools, 2026-09):
       currently simulate scrolling the scrollable history box to force more
       to load (unconfirmed whether that's needed -- flag if row counts look
       suspiciously low vs. what the site shows visually).
-
-  /27/player/{id}/{slug}  (used only for "popular-only" players, i.e. found
-    on the Popular list but not caught by any market-list price bucket or
-    squad -- for those we don't already have a price)
-    Live price: .price.inline-with-icon.lowest-price-1
-    Platform is a page-wide toggle (POST /change-platform, not a URL param
-    like the sales page): a <button name="platform" value="ps|pc"> inside
-    a <form>, with the currently-active one's child .og-radio carrying
-    class "checked". We read the price, note which platform is currently
-    active from that "checked" marker, click the other button (submits the
-    form -> full reload), then read price again for the other platform.
 
   /27/popular
     a.playercard-wrapper[href^="/27/player/"] -> id + slug, same pattern as
@@ -116,19 +109,6 @@ SALES_EXTRACT_JS = """
         });
     }
     return JSON.stringify({ daily, live, history, n_history_rows: history.length });
-})()
-"""
-
-PLAYER_PRICE_JS = """
-(() => {
-    const priceEl = document.querySelector('.price.inline-with-icon.lowest-price-1');
-    const price = priceEl ? priceEl.textContent.trim() : null;
-    let activePlatform = null;
-    document.querySelectorAll('form[action="/change-platform"] button[name="platform"]').forEach(btn => {
-        const radio = btn.querySelector('.og-radio');
-        if (radio && radio.classList.contains('checked')) activePlatform = btn.getAttribute('value');
-    });
-    return JSON.stringify({ price, activePlatform });
 })()
 """
 
@@ -248,55 +228,20 @@ async def fetch_sales_page(tab, pid, slug, platform):
     }
 
 
-async def fetch_popular_only_price(tab, pid, slug):
-    """Player-page live price via the POST /change-platform toggle, for
-    players we have no market-list price for at all."""
-    url = f"{BASE}/27/player/{pid}/{slug}"
-    await tab.get(url)
-    first = await poll_for(tab, PLAYER_PRICE_JS, lambda r: r and r.get("price"), {"price": None, "activePlatform": None})
-    prices = {}
-    if first.get("activePlatform"):
-        prices[first["activePlatform"]] = first.get("price")
-
-    other = "pc" if first.get("activePlatform") == "ps" else "ps"
-    clicked = await tab.evaluate(
-        f"""(() => {{
-            const btn = document.querySelector('form[action="/change-platform"] button[value="{other}"]');
-            if (btn) {{ btn.click(); return true; }}
-            return false;
-        }})()"""
-    )
-    if clicked:
-        await asyncio.sleep(1.5)
-        second = await poll_for(tab, PLAYER_PRICE_JS, lambda r: r and r.get("price"), {"price": None, "activePlatform": None})
-        if second.get("activePlatform"):
-            prices[second["activePlatform"]] = second.get("price")
-
-    return {"player_id": pid, "slug": slug, "price_ps": prices.get("ps"), "price_pc": prices.get("pc")}
-
-
-async def worker(name, tab, queue, sales_f, popular_only_f, scraped_at):
-    n_sales = n_prices = 0
+async def worker(name, tab, queue, sales_f, scraped_at):
+    n_sales = 0
     while True:
         async with out_lock:
             if not queue:
-                return n_sales, n_prices
+                return n_sales
             job = queue.popleft()
         try:
-            if job["type"] == "sales":
-                rec = await fetch_sales_page(tab, job["player_id"], job["slug"], job["platform"])
-                rec["scraped_at"] = scraped_at
-                async with out_lock:
-                    sales_f.write(json.dumps(rec) + "\n")
-                    sales_f.flush()
-                n_sales += 1
-            else:  # popular_only_price
-                rec = await fetch_popular_only_price(tab, job["player_id"], job["slug"])
-                rec["scraped_at"] = scraped_at
-                async with out_lock:
-                    popular_only_f.write(json.dumps(rec) + "\n")
-                    popular_only_f.flush()
-                n_prices += 1
+            rec = await fetch_sales_page(tab, job["player_id"], job["slug"], job["platform"])
+            rec["scraped_at"] = scraped_at
+            async with out_lock:
+                sales_f.write(json.dumps(rec) + "\n")
+                sales_f.flush()
+            n_sales += 1
         except Exception as e:
             async with out_lock:
                 print(f"  tab{name} ERROR on {job}: {str(e)[:80]}")
@@ -330,39 +275,29 @@ async def main():
 
     market_players = load_market_players()
     popular_players = await scrape_popular_list(tabs[0])
-    popular_only_ids = set(popular_players) - set(market_players)
-    print(f"  {len(popular_only_ids)} players are popular-list-only (no market-list price)")
-
     all_players = dict(market_players)
     all_players.update(popular_players)
+    print(f"Total unique players: {len(all_players)}")
 
     jobs = deque()
     for pid, slug in all_players.items():
         for platform in PLATFORMS:
-            jobs.append({"type": "sales", "player_id": pid, "slug": slug, "platform": platform})
-    for pid in popular_only_ids:
-        jobs.append({"type": "popular_only_price", "player_id": pid, "slug": all_players[pid]})
+            jobs.append({"player_id": pid, "slug": slug, "platform": platform})
 
-    print(f"Total jobs: {len(jobs)} ({len(all_players)} players x {len(PLATFORMS)} platforms for sales, "
-          f"+ {len(popular_only_ids)} popular-only price lookups)")
+    print(f"Total jobs: {len(jobs)} ({len(all_players)} players x {len(PLATFORMS)} platforms)")
 
     scraped_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     sales_path = SCRAPES_DIR / f"player_sales_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
-    popular_only_path = SCRAPES_DIR / f"popular_only_prices_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
     print(f"Writing sales data to {sales_path}")
-    print(f"Writing popular-only prices to {popular_only_path}")
 
     pbar = tqdm(total=len(jobs), desc="Player jobs", unit="job")
-    with open(sales_path, "w", encoding="utf-8") as sales_f, \
-         open(popular_only_path, "w", encoding="utf-8") as popular_only_f:
+    with open(sales_path, "w", encoding="utf-8") as sales_f:
         results = await asyncio.gather(
-            *[worker(i, tabs[i], jobs, sales_f, popular_only_f, scraped_at) for i in range(len(tabs))]
+            *[worker(i, tabs[i], jobs, sales_f, scraped_at) for i in range(len(tabs))]
         )
     pbar.close()
 
-    total_sales = sum(r[0] for r in results)
-    total_prices = sum(r[1] for r in results)
-    print(f"\nDone: {total_sales} sales pages, {total_prices} popular-only prices")
+    print(f"\nDone: {sum(results)} sales pages -> {sales_path}")
     try:
         browser.stop()
     except Exception:
