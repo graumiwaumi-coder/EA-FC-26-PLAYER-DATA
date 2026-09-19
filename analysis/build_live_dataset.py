@@ -251,7 +251,10 @@ def _melt_platform_row(rec, platform_label, suffix):
         "ea_average": parse_money(rec.get(f"ea_average_{suffix}")),
         "difference": parse_money(rec.get(f"difference_{suffix}")),
         "ea_tax": parse_money(rec.get(f"ea_tax_{suffix}")),
-        "source": rec.get("source"),
+        # "source" was added to the scraper after some early runs -- infer
+        # it from "squad" for files that predate that field instead of
+        # leaving it null.
+        "source": rec.get("source") or ("squad" if rec.get("squad") else "price_range"),
         "squad": rec.get("squad"),
     }
 
