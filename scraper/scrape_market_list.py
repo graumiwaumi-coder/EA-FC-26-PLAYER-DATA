@@ -20,6 +20,12 @@ Two coverage passes, both writing to the same output file:
      regardless of which param filtered it) -- we sweep both anyway to
      also catch anything listed on only one platform's market.
 
+Both passes are flattened into one job queue and run across several
+parallel browser tabs (same pattern as rebuild_all.py: one Chrome process,
+NUM_TABS tabs, each tab claims and fully paginates one job at a time from
+a shared queue) since each job (a squad or a price bucket) is independent
+of every other job -- only pages *within* one job must be sequential.
+
 Confirmed page structure (inspected directly in DevTools, 2026-09):
   tr.player-row
     td.market-table-name -> a.table-player-name (name + href like /27/player/21977/slug)
@@ -35,13 +41,15 @@ there's no reliable way to auto-discover them without fragile UI-click
 automation. Update this list periodically -- as of 2026-09-19 there is only
 one (TeamOfTheWeek1), consistent with FC27's season having just started.
 
-Run: xvfb-run python3 scrape_market_list.py
+Run: xvfb-run python3 scrape_market_list.py [num_tabs]
 Requires: pip install nodriver tqdm
 """
 import asyncio
 import json
 import re
+import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import nodriver as uc
@@ -54,6 +62,8 @@ OUT_DIR = SCRIPT_DIR / "scrapes"
 OUT_DIR.mkdir(exist_ok=True)
 
 BASE_URL = "https://www.futbin.com/27/market-player-list"
+
+NUM_TABS = int(sys.argv[1]) if len(sys.argv) > 1 else 6
 
 # Update this list as new promo squads drop (check Version -> Squads filter on the site)
 SQUADS = [
@@ -119,6 +129,9 @@ EXTRACT_JS = """
 })()
 """
 
+out_lock = asyncio.Lock()
+pbar = None
+
 
 def kill_chrome():
     import subprocess as _sp
@@ -158,67 +171,107 @@ async def extract_rows(tab):
     return []
 
 
-async def scrape_query(tab, url_params, label, max_pages, out_f, scraped_at, source, extra_fields):
+def build_jobs():
+    """Flatten the squad pass and price-range pass into one list of independent jobs."""
+    jobs = []
+    for squad in SQUADS:
+        jobs.append({
+            "url_params": {"p_squad": squad},
+            "label": f"squad={squad}",
+            "max_pages": MAX_PAGES_PER_SQUAD,
+            "source": "squad",
+            "extra_fields": {"squad": squad},
+        })
+    for platform in PLATFORMS:
+        param_name = f"{platform}_price"
+        for lo, hi in PRICE_RANGES:
+            jobs.append({
+                "url_params": {param_name: f"{lo}-{hi}"},
+                "label": f"{param_name}={lo}-{hi}",
+                "max_pages": MAX_PAGES_PER_RANGE,
+                "source": "price_range",
+                "extra_fields": {"price_filter_platform": platform, "price_lo": lo, "price_hi": hi},
+            })
+    return jobs
+
+
+async def run_job(tab, job, out_f, scraped_at):
     """Paginate a single filtered query (squad or price-bucket) until empty/capped."""
+    label = job["label"]
     total_rows = 0
-    for page in range(1, max_pages + 1):
-        params = dict(url_params, page=page)
+    for page in range(1, job["max_pages"] + 1):
+        params = dict(job["url_params"], page=page)
         qs = "&".join(f"{k}={v}" for k, v in params.items())
         url = f"{BASE_URL}?{qs}"
         await tab.get(url)
         rows = await extract_rows(tab)
         if not rows:
-            print(f"  {label} page={page}: no rows, stopping pagination")
             break
-        for r in rows:
-            r["player_id"] = parse_player_id(r.get("player_url"))
-            r["source"] = source
-            r["scraped_at"] = scraped_at
-            r.update(extra_fields)
-            out_f.write(json.dumps(r) + "\n")
-        out_f.flush()
+        async with out_lock:
+            for r in rows:
+                r["player_id"] = parse_player_id(r.get("player_url"))
+                r["source"] = job["source"]
+                r["scraped_at"] = scraped_at
+                r.update(job["extra_fields"])
+                out_f.write(json.dumps(r) + "\n")
+            out_f.flush()
         total_rows += len(rows)
-        print(f"  {label} page={page}: {len(rows)} rows (running total {total_rows})")
-        if page == max_pages:
-            print(f"  WARNING: {label} hit MAX_PAGES cap ({max_pages}) without an empty page -- "
+        if page == job["max_pages"]:
+            print(f"  WARNING: {label} hit MAX_PAGES cap ({job['max_pages']}) without an empty page -- "
                   f"this bucket/squad likely has more results than we saw. Consider narrowing it.")
         await asyncio.sleep(sum(PAGE_DELAY) / 2)
     return total_rows
 
 
-async def main():
+async def worker(name, tab, queue, out_f, scraped_at):
+    total = 0
+    while True:
+        async with out_lock:
+            if not queue:
+                return total
+            job = queue.popleft()
+        n = await run_job(tab, job, out_f, scraped_at)
+        total += n
+        async with out_lock:
+            pbar.update(1)
+            pbar.set_postfix_str(f"tab{name} last={job['label']} rows={n} tab_total={total}")
+
+
+async def launch_browser():
     kill_chrome()
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)
     config = uc.Config(user_data_dir=str(USER_DATA))
     browser = await uc.start(config=config, headless=False)
-    tab = browser.main_tab
-    await block_resources(tab)
+    tabs = [browser.main_tab]
+    for _ in range(NUM_TABS - 1):
+        try:
+            t = await browser.get("about:blank", new_tab=True)
+            tabs.append(t)
+        except Exception as e:
+            print(f"[launch] tab failed: {str(e)[:60]}")
+            break
+    for t in tabs:
+        await block_resources(t)
+    return browser, tabs
 
+
+async def main():
+    global pbar
+    jobs = deque(build_jobs())
     scraped_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     out_path = OUT_DIR / f"market_list_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
     print(f"Writing to {out_path}")
+    print(f"Total jobs: {len(jobs)} (1 squad + {len(PLATFORMS)}x{len(PRICE_RANGES)} price buckets), {NUM_TABS} tabs")
 
-    grand_total = 0
+    browser, tabs = await launch_browser()
+    print(f"Launched {len(tabs)} tabs")
+
+    pbar = tqdm(total=len(jobs), desc="Jobs", unit="job")
     with open(out_path, "w", encoding="utf-8") as out_f:
-        print("\n=== Squad pass (named promo versions) ===")
-        for squad in tqdm(SQUADS, desc="Squads"):
-            n = await scrape_query(
-                tab, {"p_squad": squad}, f"squad={squad}", MAX_PAGES_PER_SQUAD,
-                out_f, scraped_at, source="squad", extra_fields={"squad": squad},
-            )
-            grand_total += n
-
-        print("\n=== Price-range pass (full market coverage, both platforms) ===")
-        for platform in PLATFORMS:
-            param_name = f"{platform}_price"
-            for lo, hi in tqdm(PRICE_RANGES, desc=f"{platform}_price buckets"):
-                label = f"{param_name}={lo}-{hi}"
-                n = await scrape_query(
-                    tab, {param_name: f"{lo}-{hi}"}, label, MAX_PAGES_PER_RANGE,
-                    out_f, scraped_at, source="price_range",
-                    extra_fields={"price_filter_platform": platform, "price_lo": lo, "price_hi": hi},
-                )
-                grand_total += n
+        grand_total = sum(await asyncio.gather(
+            *[worker(i, tabs[i], jobs, out_f, scraped_at) for i in range(len(tabs))]
+        ))
+    pbar.close()
 
     print(f"\nDone: {grand_total} total rows -> {out_path}")
     try:
