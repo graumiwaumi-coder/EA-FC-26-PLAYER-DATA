@@ -66,6 +66,7 @@ def free_memory():
 
 
 MIN_RATING = 75  # your stated trading focus: gold and above
+MIN_TRADE_PRICE = 5_000  # excludes near-worthless fodder (a "10x return" on a 900-coin card is not a real strategy)
 
 ROOT = Path("/content")
 DATA_DIR = ROOT / "data"
@@ -492,6 +493,12 @@ print(f"Date range: {min_date.date()} to {max_date.date()} ({total_days} days)\\
 # rolling-forward folds: test windows at 55-65%, 65-75%, 75-85%, 85-95% of the season
 fold_edges = [0.55, 0.65, 0.75, 0.85, 0.95]
 fold_results = []
+# also collect genuinely OUT-OF-SAMPLE, de-duplicated (non-overlapping), fodder-filtered
+# confident-episode returns across all folds -- this feeds the bankroll simulation later.
+# Using the final model's predictions on its OWN training data (in-sample) would look
+# far rosier than reality; this way the simulation only ever sees returns from test
+# periods the predicting model never trained on, matching the rigor used locally.
+oos_confident_returns = []
 
 for i in range(len(fold_edges) - 1):
     test_start_q, test_end_q = fold_edges[i], fold_edges[i + 1]
@@ -524,10 +531,31 @@ for i in range(len(fold_edges) - 1):
           f"| AUC={auc:.3f} | confident(>=0.5) n={mask_conf.sum()} win_rate={win_rate:.1%} median_return={med_ret:.1%}")
     fold_results.append({"fold": i+1, "auc": auc, "win_rate": win_rate, "median_return": med_ret, "n_confident": mask_conf.sum()})
 
+    # de-duplicate this fold's confident test rows to ~independent episodes (daily
+    # snapshots of the same player are heavily autocorrelated, not separate trades)
+    # and stash the fodder-filtered returns for the bankroll simulation
+    fold_test_meta = df.loc[test_mask, ["player_id", "platform", "ma_7"]].copy()
+    fold_test_meta["proba"] = proba
+    fold_test_meta[target_reg] = y_test_reg.to_numpy()
+    fold_test_meta = fold_test_meta.sort_values(["player_id", "platform"])
+    fold_test_meta["day_rank"] = fold_test_meta.groupby(["player_id", "platform"]).cumcount()
+    dedup_fold = fold_test_meta[(fold_test_meta["day_rank"] % HORIZON == 0) &
+                                 (fold_test_meta["ma_7"] >= MIN_TRADE_PRICE) &
+                                 (fold_test_meta["proba"] >= 0.5)]
+    oos_confident_returns.extend(dedup_fold[target_reg].dropna().tolist())
+    del fold_test_meta, dedup_fold
+
     # free each fold's data/model before the next iteration -- otherwise 4 folds'
     # worth of train/test copies and fitted models stay resident simultaneously
     del X_train, y_train, X_test, y_test, y_test_reg, clf, proba, mask_conf
     free_memory()
+
+oos_confident_returns = np.array(oos_confident_returns)
+print(f"\\nCollected {len(oos_confident_returns)} genuinely out-of-sample, de-duplicated, "
+      f"fodder-filtered confident episodes across all folds: mean={oos_confident_returns.mean():.1%}, "
+      f"median={np.median(oos_confident_returns):.1%}, win_rate={(oos_confident_returns>0).mean():.1%}")
+print("(this is what the bankroll simulation in Step 8 uses -- NOT the final model's predictions on")
+print("its own training data, which would look unrealistically good)")
 
 fold_df = pd.DataFrame(fold_results)
 print("\\n=== Summary across folds ===")
@@ -676,16 +704,16 @@ md("## Step 8: Bankroll simulation -- realistic range of outcomes, not a hopeful
    "across 20 simultaneous positions per cycle.")
 
 code("""
-MIN_TRADE_PRICE = 5_000
 N_SIMULATIONS = 20000
 N_CYCLES = 11
 STARTING_BANKROLLS = [100_000, 500_000, 1_000_000]
 
-sim_returns = df[(df[target_reg].notna())].copy()
-sim_returns = sim_returns[sim_returns["ma_7"] >= MIN_TRADE_PRICE]
-sim_returns["proba_placeholder"] = clf_final.predict_proba(sim_returns[ALL_FEATURES])[:, 1]
-confident_returns = sim_returns.loc[sim_returns["proba_placeholder"] >= 0.5, target_reg].dropna().to_numpy()
-print(f"Historical confident-episode returns (fodder-filtered): n={len(confident_returns)}, "
+# IMPORTANT: use the out-of-sample returns collected during Step 5's walk-forward
+# folds (oos_confident_returns), NOT clf_final's predictions on its own training
+# data -- evaluating a model on data it was trained on looks far rosier than
+# reality (a fitted model partially "remembers" its own training examples).
+confident_returns = oos_confident_returns
+print(f"Using {len(confident_returns)} out-of-sample confident episodes from Step 5's folds: "
       f"mean={confident_returns.mean():.1%}, median={np.median(confident_returns):.1%}, "
       f"win_rate={(confident_returns>0).mean():.1%}")
 
