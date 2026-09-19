@@ -12,6 +12,7 @@ the real search.
 
 Run: python3 tune_hyperparameters.py [--full]
 """
+import gc
 import itertools
 import sys
 import time
@@ -177,21 +178,34 @@ def main():
     folds = make_folds(df, fold_edges)
     print(f"Using {len(folds)} folds")
 
-    total_fits = len(combos) * len(folds)
-    progress = ProgressTracker(total_fits)
-    print(f"Total model fits this run: {total_fits}\n")
+    # Checkpoint to disk after every combo (not just at the end) so a crash --
+    # OOM kill, dropped SSH session, anything -- loses at most one in-flight
+    # combo instead of the whole run. Resuming (same out file already on
+    # disk) skips combos already checkpointed rather than redoing them.
+    out_name = "tuning_results_full.csv" if full_run else "tuning_results_smoketest.csv"
+    out_path = DATA_DIR / out_name
+    param_keys = list(combos[0].keys())
+    done_params = set()
+    if out_path.exists():
+        existing_df = pd.read_csv(out_path)
+        done_params = set(tuple(row) for row in existing_df[param_keys].itertuples(index=False, name=None))
+        print(f"Resuming: {len(done_params)} combos already checkpointed in {out_name}, skipping those")
 
-    results = []
-    for i, params in enumerate(combos):
-        print(f"Combo {i+1}/{len(combos)}: {params}")
+    remaining = [p for p in combos if tuple(p[k] for k in param_keys) not in done_params]
+    total_fits = len(remaining) * len(folds)
+    progress = ProgressTracker(total_fits)
+    print(f"Total model fits this run: {total_fits} ({len(remaining)}/{len(combos)} combos remaining)\n")
+
+    for i, params in enumerate(remaining):
+        print(f"Combo {i+1}/{len(remaining)}: {params}")
         auc_mean, auc_std, win_rate = evaluate_combo(df, folds, target_clf, params, cat_idx, progress=progress)
         print(f"  -> AUC={auc_mean:.4f} (std={auc_std:.4f}) win_rate={win_rate:.1%}\n")
-        results.append({**params, "auc_mean": auc_mean, "auc_std": auc_std, "win_rate": win_rate})
+        row_df = pd.DataFrame([{**params, "auc_mean": auc_mean, "auc_std": auc_std, "win_rate": win_rate}])
+        row_df.to_csv(out_path, mode="a", header=not out_path.exists(), index=False)
+        gc.collect()
 
-    results_df = pd.DataFrame(results).sort_values("auc_mean", ascending=False)
-    out_name = "tuning_results_full.csv" if full_run else "tuning_results_smoketest.csv"
-    results_df.to_csv(DATA_DIR / out_name, index=False)
-    print(f"\nSaved {out_name}")
+    print(f"\nAll combos checkpointed to {out_name}")
+    results_df = pd.read_csv(out_path).sort_values("auc_mean", ascending=False)
     print("\n=== Top result ===")
     print(results_df.iloc[0])
 
