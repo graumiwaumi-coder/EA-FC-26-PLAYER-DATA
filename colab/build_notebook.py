@@ -83,8 +83,38 @@ DATA_DIR.mkdir(exist_ok=True)
 MODEL_DIR.mkdir(exist_ok=True)
 
 ZIP_PATH = ROOT / "futbin_all_rebuild.zip"
+JSONL_PATH = ROOT / "futbin_all_rebuild.jsonl"
 INDICES_PATH = ROOT / "futbin_market_indices.jsonl"
 JSONL_NAME = "futbin_all_rebuild.jsonl"
+
+import contextlib
+import zipfile
+
+
+@contextlib.contextmanager
+def open_players_jsonl():
+    # accepts EITHER the zipped export (futbin_all_rebuild.zip) OR the raw
+    # .jsonl file uploaded directly -- some export workflows produce one,
+    # some the other, and there's no reason to force a re-zip for this.
+    if ZIP_PATH.exists():
+        with zipfile.ZipFile(ZIP_PATH) as z:
+            with z.open(JSONL_NAME) as f:
+                yield f
+    elif JSONL_PATH.exists():
+        with open(JSONL_PATH, "rb") as f:
+            yield f
+    else:
+        raise FileNotFoundError("Neither futbin_all_rebuild.zip nor futbin_all_rebuild.jsonl was found in /content")
+
+
+def players_jsonl_size():
+    if ZIP_PATH.exists():
+        with zipfile.ZipFile(ZIP_PATH) as z:
+            return z.getinfo(JSONL_NAME).file_size
+    elif JSONL_PATH.exists():
+        return JSONL_PATH.stat().st_size
+    raise FileNotFoundError("Neither futbin_all_rebuild.zip nor futbin_all_rebuild.jsonl was found in /content")
+
 
 pd.set_option("display.width", 160)
 print("Setup complete.")
@@ -92,12 +122,13 @@ print("Setup complete.")
 
 # ---------------------------------------------------------------------------
 md("## Step 1: Upload your data files\n\nRun this cell, then click **Choose Files** and select "
-   "both `futbin_all_rebuild.zip` and `futbin_market_indices.jsonl` (you can select both at once).")
+   "your player export (either `futbin_all_rebuild.zip` OR the unzipped `futbin_all_rebuild.jsonl` "
+   "-- both work) and `futbin_market_indices.jsonl` (you can select both files at once).")
 
 code("""
 from google.colab import files
 
-print("Please upload futbin_all_rebuild.zip AND futbin_market_indices.jsonl")
+print("Please upload futbin_all_rebuild.zip (or futbin_all_rebuild.jsonl) AND futbin_market_indices.jsonl")
 uploaded = files.upload()
 
 for name in uploaded:
@@ -106,7 +137,8 @@ for name in uploaded:
         f.write(uploaded[name])
     print(f"Saved {name} ({len(uploaded[name]):,} bytes) -> {dest}")
 
-assert ZIP_PATH.exists(), "futbin_all_rebuild.zip not found -- did the upload include it?"
+assert ZIP_PATH.exists() or JSONL_PATH.exists(), \\
+    "Neither futbin_all_rebuild.zip nor futbin_all_rebuild.jsonl found -- did the upload include one of them?"
 assert INDICES_PATH.exists(), "futbin_market_indices.jsonl not found -- did the upload include it?"
 """)
 
@@ -116,19 +148,14 @@ md("## Step 2: Verify the data before trusting anything downstream\n\n"
    "truncated sample, before doing any analysis.")
 
 code("""
-import zipfile
-
-with zipfile.ZipFile(ZIP_PATH) as z:
-    info = z.getinfo(JSONL_NAME)
-    print(f"{JSONL_NAME}: {info.file_size:,} bytes (uncompressed, per zip metadata)")
+print(f"{JSONL_NAME}: {players_jsonl_size():,} bytes (per file/zip metadata)")
 
 n_lines = 0
 n_bytes = 0
-with zipfile.ZipFile(ZIP_PATH) as z:
-    with z.open(JSONL_NAME) as f:
-        for line in f:
-            n_lines += 1
-            n_bytes += len(line)
+with open_players_jsonl() as f:
+    for line in f:
+        n_lines += 1
+        n_bytes += len(line)
 print(f"Streamed count: {n_lines:,} lines, {n_bytes:,} bytes")
 
 n_idx_lines = sum(1 for _ in open(INDICES_PATH))
@@ -188,35 +215,34 @@ print(f"indices.parquet: {len(indices_df)} rows")
 # --- players + price history ---
 player_rows, price_rows = [], []
 n_lines = 0
-with zipfile.ZipFile(ZIP_PATH) as z:
-    with z.open(JSONL_NAME) as f:
-        for raw_line in f:
-            n_lines += 1
-            rec = json.loads(raw_line)
-            rating = int(rec["rating"]) if rec.get("rating") not in (None, "") else None
-            league = rec.get("league")
-            band = band_for(rating, league)
-            player_rows.append({
-                "id": rec["id"], "url": rec.get("url"), "rating": rating,
-                "position": rec.get("position"), "nation": rec.get("nation"),
-                "league": league, "club": rec.get("club"), "squad": rec.get("squad"),
-                "skills": int(rec["skills"]) if rec.get("skills") not in (None, "") else None,
-                "weak_foot": int(rec["weak_foot"]) if rec.get("weak_foot") not in (None, "") else None,
-                "height_cm": parse_height_cm(rec.get("height")), "foot": rec.get("foot"),
-                "body_type": rec.get("btype"), "age": parse_age(rec.get("age")),
-                "playstyles": "|".join(rec.get("playstyles") or []),
-                "n_playstyles": len(rec.get("playstyles") or []),
-                "roles_text": rec.get("roles_text"), "band": band,
-            })
-            for platform, key in (("pc", "pc"), ("console", "ps")):
-                try:
-                    series = json.loads(rec[key])
-                except (KeyError, TypeError, json.JSONDecodeError):
-                    continue
-                for ts, price in series:
-                    price_rows.append((rec["id"], platform, ts, price))
-            if n_lines % 5000 == 0:
-                print(f"  ...{n_lines} players parsed")
+with open_players_jsonl() as f:
+    for raw_line in f:
+        n_lines += 1
+        rec = json.loads(raw_line)
+        rating = int(rec["rating"]) if rec.get("rating") not in (None, "") else None
+        league = rec.get("league")
+        band = band_for(rating, league)
+        player_rows.append({
+            "id": rec["id"], "url": rec.get("url"), "rating": rating,
+            "position": rec.get("position"), "nation": rec.get("nation"),
+            "league": league, "club": rec.get("club"), "squad": rec.get("squad"),
+            "skills": int(rec["skills"]) if rec.get("skills") not in (None, "") else None,
+            "weak_foot": int(rec["weak_foot"]) if rec.get("weak_foot") not in (None, "") else None,
+            "height_cm": parse_height_cm(rec.get("height")), "foot": rec.get("foot"),
+            "body_type": rec.get("btype"), "age": parse_age(rec.get("age")),
+            "playstyles": "|".join(rec.get("playstyles") or []),
+            "n_playstyles": len(rec.get("playstyles") or []),
+            "roles_text": rec.get("roles_text"), "band": band,
+        })
+        for platform, key in (("pc", "pc"), ("console", "ps")):
+            try:
+                series = json.loads(rec[key])
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+            for ts, price in series:
+                price_rows.append((rec["id"], platform, ts, price))
+        if n_lines % 5000 == 0:
+            print(f"  ...{n_lines} players parsed")
 
 players_df = pd.DataFrame(player_rows)
 prices_df = pd.DataFrame(price_rows, columns=["player_id", "platform", "ts_ms", "price"])
