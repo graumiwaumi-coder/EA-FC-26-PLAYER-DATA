@@ -14,6 +14,7 @@ Run: python3 tune_hyperparameters.py [--full]
 """
 import itertools
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -88,9 +89,38 @@ def make_folds(df, fold_edges):
     return folds
 
 
-def evaluate_combo(df, folds, target_clf, params, cat_idx):
+class ProgressTracker:
+    """Prints a % progress bar with elapsed time and an ETA, updated after every
+    individual model fit (not just every combo) so a long unattended run never
+    looks stalled."""
+
+    def __init__(self, total_fits):
+        self.total = total_fits
+        self.done = 0
+        self.start_time = time.time()
+
+    def tick(self, label=""):
+        self.done += 1
+        elapsed = time.time() - self.start_time
+        rate = elapsed / self.done
+        remaining = rate * (self.total - self.done)
+        pct = self.done / self.total
+        bar_len = 30
+        filled = int(bar_len * pct)
+        bar = "#" * filled + "-" * (bar_len - filled)
+
+        def fmt(secs):
+            m, s = divmod(int(secs), 60)
+            h, m = divmod(m, 60)
+            return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s"
+
+        print(f"  [{bar}] {pct:.0%} ({self.done}/{self.total}) "
+              f"elapsed={fmt(elapsed)} ETA={fmt(remaining)} {label}", flush=True)
+
+
+def evaluate_combo(df, folds, target_clf, params, cat_idx, progress=None):
     aucs, win_rates = [], []
-    for train_mask, test_mask in folds:
+    for fold_i, (train_mask, test_mask) in enumerate(folds):
         X_train = df.loc[train_mask, ALL_FEATURES]
         y_train = df.loc[train_mask, target_clf].astype(int)
         X_test = df.loc[test_mask, ALL_FEATURES]
@@ -100,10 +130,13 @@ def evaluate_combo(df, folds, target_clf, params, cat_idx):
                                               validation_fraction=0.15, random_state=42, **params)
         clf.fit(X_train, y_train)
         proba = clf.predict_proba(X_test)[:, 1]
-        aucs.append(roc_auc_score(y_test, proba))
+        fold_auc = roc_auc_score(y_test, proba)
+        aucs.append(fold_auc)
         mask_conf = proba >= 0.5
         if mask_conf.sum() > 0:
             win_rates.append(y_test.to_numpy()[mask_conf].mean())
+        if progress is not None:
+            progress.tick(f"(fold {fold_i+1}/{len(folds)}, AUC={fold_auc:.3f})")
     return np.mean(aucs), np.std(aucs), np.mean(win_rates) if win_rates else np.nan
 
 
@@ -144,10 +177,15 @@ def main():
     folds = make_folds(df, fold_edges)
     print(f"Using {len(folds)} folds")
 
+    total_fits = len(combos) * len(folds)
+    progress = ProgressTracker(total_fits)
+    print(f"Total model fits this run: {total_fits}\n")
+
     results = []
     for i, params in enumerate(combos):
-        auc_mean, auc_std, win_rate = evaluate_combo(df, folds, target_clf, params, cat_idx)
-        print(f"[{i+1}/{len(combos)}] {params} -> AUC={auc_mean:.4f} (std={auc_std:.4f}) win_rate={win_rate:.1%}")
+        print(f"Combo {i+1}/{len(combos)}: {params}")
+        auc_mean, auc_std, win_rate = evaluate_combo(df, folds, target_clf, params, cat_idx, progress=progress)
+        print(f"  -> AUC={auc_mean:.4f} (std={auc_std:.4f}) win_rate={win_rate:.1%}\n")
         results.append({**params, "auc_mean": auc_mean, "auc_std": auc_std, "win_rate": win_rate})
 
     results_df = pd.DataFrame(results).sort_values("auc_mean", ascending=False)
