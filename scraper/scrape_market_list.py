@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 """
-Scrape futbin's FC27 market-player-list page for Squads-version (promo) players.
+Scrape futbin's FC27 market-player-list page for live prices.
+
+Two coverage passes, both writing to the same output file:
+
+  1. SQUAD pass -- current Squads/promo versions (?p_squad=<key>), so we
+     always have an explicit, named catch of promo cards.
+  2. PRICE-RANGE pass -- full market coverage. The market-player-list page
+     caps how many pages it will show for any single query, so to see
+     every currently-listed player we bucket by price and sweep each
+     bucket separately (?ps_price=<lo>-<hi> / ?pc_price=<lo>-<hi>).
+
+     Confirmed live (2026-09-19) via test_price_param.py: ps_price and
+     pc_price are genuinely independent per-platform filters -- e.g.
+     ps_price=10000-50000 returns rows where 100% have price_ps in that
+     bucket, but only ~62% also have price_pc in that same bucket (the two
+     economies diverge). So one platform's buckets alone would already
+     catch ~all tradeable players (every row still carries BOTH prices
+     regardless of which param filtered it) -- we sweep both anyway to
+     also catch anything listed on only one platform's market.
 
 Confirmed page structure (inspected directly in DevTools, 2026-09):
   tr.player-row
@@ -11,16 +29,13 @@ Confirmed page structure (inspected directly in DevTools, 2026-09):
        .platform-pc-only variants present in the SAME page load -- no platform
        toggle needed, we grab both in one pass.
 
-Squad filtering is URL-based: ?p_squad=<key>, pagination is ?page=<n>. Both
-combine: ?p_squad=<key>&page=<n>.
-
 SQUADS below is a manually-maintained list (checked directly in the site's
 Version -> Squads filter dropdown) since new promo squads drop weekly and
 there's no reliable way to auto-discover them without fragile UI-click
 automation. Update this list periodically -- as of 2026-09-19 there is only
 one (TeamOfTheWeek1), consistent with FC27's season having just started.
 
-Run: python3 scrape_market_list.py
+Run: xvfb-run python3 scrape_market_list.py
 Requires: pip install nodriver tqdm
 """
 import asyncio
@@ -45,7 +60,23 @@ SQUADS = [
     "TeamOfTheWeek1",
 ]
 
-MAX_PAGES_PER_SQUAD = 50  # safety cap, stop earlier if a page comes back empty
+# Buckets partition the full observed price range per platform. Keep buckets
+# narrow enough at the low end (where most fodder/cheap cards cluster) that
+# no single bucket is likely to blow past MAX_PAGES_PER_RANGE; a warning is
+# printed (and the bucket recorded in the log) if one does, so it can be
+# split further later based on real run data.
+PRICE_RANGES = [
+    (0, 500), (500, 1000), (1000, 2000), (2000, 3500), (3500, 5000),
+    (5000, 7500), (7500, 10000), (10000, 15000), (15000, 20000),
+    (20000, 35000), (35000, 50000), (50000, 75000), (75000, 100000),
+    (100000, 150000), (150000, 200000), (200000, 350000), (350000, 500000),
+    (500000, 750000), (750000, 1000000), (1000000, 1500000),
+    (1500000, 2500000), (2500000, 5000000), (5000000, 15000000),
+]
+PLATFORMS = ["ps", "pc"]
+
+MAX_PAGES_PER_SQUAD = 50   # safety cap, stop earlier if a page comes back empty
+MAX_PAGES_PER_RANGE = 50   # same cap for a single price bucket
 PAGE_DELAY = (0.6, 1.2)
 MAX_WAIT_SECONDS = 15
 POLL_INTERVAL = 0.5
@@ -128,23 +159,30 @@ async def extract_rows(tab):
     return []
 
 
-async def scrape_squad(tab, squad, out_f, scraped_at):
+async def scrape_query(tab, url_params, label, max_pages, out_f, scraped_at, source, extra_fields):
+    """Paginate a single filtered query (squad or price-bucket) until empty/capped."""
     total_rows = 0
-    for page in range(1, MAX_PAGES_PER_SQUAD + 1):
-        url = f"{BASE_URL}?p_squad={squad}&page={page}"
+    for page in range(1, max_pages + 1):
+        params = dict(url_params, page=page)
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        url = f"{BASE_URL}?{qs}"
         await tab.get(url)
         rows = await extract_rows(tab)
         if not rows:
-            print(f"  squad={squad} page={page}: no rows, stopping pagination")
+            print(f"  {label} page={page}: no rows, stopping pagination")
             break
         for r in rows:
             r["player_id"] = parse_player_id(r.get("player_url"))
-            r["squad"] = squad
+            r["source"] = source
             r["scraped_at"] = scraped_at
+            r.update(extra_fields)
             out_f.write(json.dumps(r) + "\n")
         out_f.flush()
         total_rows += len(rows)
-        print(f"  squad={squad} page={page}: {len(rows)} rows (running total {total_rows})")
+        print(f"  {label} page={page}: {len(rows)} rows (running total {total_rows})")
+        if page == max_pages:
+            print(f"  WARNING: {label} hit MAX_PAGES cap ({max_pages}) without an empty page -- "
+                  f"this bucket/squad likely has more results than we saw. Consider narrowing it.")
         await asyncio.sleep(sum(PAGE_DELAY) / 2)
     return total_rows
 
@@ -163,11 +201,27 @@ async def main():
 
     grand_total = 0
     with open(out_path, "w", encoding="utf-8") as out_f:
+        print("\n=== Squad pass (named promo versions) ===")
         for squad in tqdm(SQUADS, desc="Squads"):
-            n = await scrape_squad(tab, squad, out_f, scraped_at)
+            n = await scrape_query(
+                tab, {"p_squad": squad}, f"squad={squad}", MAX_PAGES_PER_SQUAD,
+                out_f, scraped_at, source="squad", extra_fields={"squad": squad},
+            )
             grand_total += n
 
-    print(f"\nDone: {grand_total} total rows across {len(SQUADS)} squad(s) -> {out_path}")
+        print("\n=== Price-range pass (full market coverage, both platforms) ===")
+        for platform in PLATFORMS:
+            param_name = f"{platform}_price"
+            for lo, hi in tqdm(PRICE_RANGES, desc=f"{platform}_price buckets"):
+                label = f"{param_name}={lo}-{hi}"
+                n = await scrape_query(
+                    tab, {param_name: f"{lo}-{hi}"}, label, MAX_PAGES_PER_RANGE,
+                    out_f, scraped_at, source="price_range",
+                    extra_fields={"price_filter_platform": platform, "price_lo": lo, "price_hi": hi},
+                )
+                grand_total += n
+
+    print(f"\nDone: {grand_total} total rows -> {out_path}")
     try:
         browser.stop()
     except Exception:
