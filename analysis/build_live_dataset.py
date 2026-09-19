@@ -135,12 +135,13 @@ def merge_player_history():
 
     player_rows, price_rows = [], []
     for rec in records:
+        # rating is usually just "86", but an over-broad DOM selector can grab
+        # a whole card's text ("86\n  CM\n  ++") -- take the leading digits
+        # either way rather than requiring an exact int-parseable string.
         rating = None
-        if rec.get("rating") not in (None, ""):
-            try:
-                rating = int(rec["rating"])
-            except (ValueError, TypeError):
-                rating = None
+        m = re.match(r"\s*(\d+)", str(rec.get("rating") or ""))
+        if m:
+            rating = int(m.group(1))
         player_rows.append({
             "id": rec["id"],
             "url": rec.get("url"),

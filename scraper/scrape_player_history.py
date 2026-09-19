@@ -132,7 +132,7 @@ async def extract_everything(tab):
             return JSON.stringify({
                 pc: pcv,
                 ps: psv,
-                rating: rt ? rt.textContent.trim() : null,
+                rating: rt ? ((rt.textContent.trim().match(/^\\d+/) || [])[0] || null) : null,
                 position: pos ? pos.textContent.trim() : null,
                 anchors: anchors,
                 playstyles: playstyles,
