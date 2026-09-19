@@ -21,7 +21,15 @@ md("""# EA FC 26 Trading Model
 2. When a file-upload box appears, upload your two exported files:
    `futbin_all_rebuild.zip` and `futbin_market_indices.jsonl`
 3. Wait for it to finish (the heaviest step, feature engineering, takes the longest).
-4. Scroll to the bottom for **today's picks** and a downloadable CSV.
+4. Scroll to the bottom for a ranked list of players and a downloadable CSV.
+
+**Important: this is NOT live pricing.** The ranked list at the end reflects market
+conditions as of the LAST DATE PRESENT IN YOUR UPLOADED FILE -- not a real-time price
+feed, and not a "buy this exact listing right now" signal. If you upload an export from
+a month ago, the list reflects that month-old snapshot. The closer you run this to when
+you exported the data, the more current the list is. Live, real-time buy/sell decisions
+are a later, not-yet-built phase -- this notebook is the periodic retrain-and-review step:
+re-export your data whenever you want a refresh, then Run All again.
 
 **To retrain on a new export later:** just come back to this notebook and do the same
 thing (`Run all`, upload the new files). Everything rebuilds from scratch each time,
@@ -647,13 +655,19 @@ print(res_df.sort_values("median_ret", ascending=False).to_string(index=False))
 """)
 
 # ---------------------------------------------------------------------------
-md("## Step 7: Today's picks, ranked by ABSOLUTE expected coin profit (not %)")
+md("## Step 7: Ranked picks as of your data's most recent snapshot date\n\n"
+   "Ranked by ABSOLUTE expected coin profit (not %). **Read the date this cell prints "
+   "before trusting the list below** -- it's the last date in the file you uploaded, "
+   "not necessarily today's real-world date.")
 
 code("""
 BUDGET_TIERS = [("small (<=200k)", 0, 200_000), ("medium (200k-1M)", 200_000, 1_000_000), ("large (>1M)", 1_000_000, float("inf"))]
 
 latest_date = dataset2.to_table(columns=["date"]).to_pandas()["date"].max()
-print(f"Using latest date: {latest_date.date()}")
+days_old = (pd.Timestamp.now().normalize() - latest_date).days
+print(f"*** These picks reflect market conditions as of {latest_date.date()} -- the last date in your")
+print(f"*** uploaded export -- which is {days_old} day(s) before today's real date. This is NOT a live")
+print(f"*** price feed. Re-export fresh data and re-run this notebook for a more current read.")
 
 pick_price_native = [c for c in NUMERIC_FEATURES if c != "rating" and c not in PLAYER_LEVEL_NUMERIC]
 pick_cols = list(dict.fromkeys(pick_price_native + ["player_id", "date", "price_clean", "platform", "rating"]))
