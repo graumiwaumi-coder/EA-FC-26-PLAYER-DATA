@@ -2,8 +2,10 @@
 """
 Per-player metadata + full price-history scraper for FC27 -- the FC27
 equivalent of rebuild_all.py (which built futbin_all_rebuild.jsonl for
-FC26). Covers every player in our FC27 universe: everyone found by
-scrape_market_list.py plus everyone on /27/popular.
+FC26). The player universe is strictly the output of scrape_market_list.py
+(its filtered market-player-list sweep) -- run that script first. We do
+NOT additionally pull in /27/popular here; a player only gets scraped if
+they showed up in the filtered market list.
 
 Confirmed live (2026-09) that /27/player/{id}/{slug} exposes a live price
 via .price.inline-with-icon.lowest-price-1 (platform-toggled via a POST
@@ -45,7 +47,6 @@ SCRAPES_DIR = SCRIPT_DIR / "scrapes"
 SCRAPES_DIR.mkdir(exist_ok=True)
 
 BASE = "https://www.futbin.com"
-POPULAR_URL = f"{BASE}/27/popular"
 
 NUM_TABS = int(sys.argv[1]) if len(sys.argv) > 1 else 6
 MAX_WAIT_SECONDS = 20
@@ -255,33 +256,6 @@ def load_player_universe():
     return players
 
 
-async def scrape_popular_list(tab):
-    await tab.get(POPULAR_URL)
-    elapsed = 0.0
-    hrefs = []
-    while elapsed < MAX_WAIT_SECONDS:
-        raw = await tab.evaluate(
-            """JSON.stringify(Array.from(document.querySelectorAll('a.playercard-wrapper[href^="/27/player/"]')).map(a => a.getAttribute('href')))"""
-        )
-        if isinstance(raw, dict):
-            raw = raw.get("value", "[]")
-        try:
-            hrefs = json.loads(raw)
-        except Exception:
-            hrefs = []
-        if hrefs:
-            break
-        await asyncio.sleep(POLL_INTERVAL)
-        elapsed += POLL_INTERVAL
-    players = {}
-    for href in hrefs:
-        pid, slug = parse_id_slug(href)
-        if pid is not None:
-            players[pid] = slug
-    print(f"  {len(players)} unique players from /27/popular")
-    return players
-
-
 async def worker(name, tab, queue, out_f, scraped_at):
     while True:
         async with out_lock:
@@ -344,8 +318,6 @@ async def main():
     print(f"Launched {len(tabs)} tabs")
 
     players = load_player_universe()
-    popular = await scrape_popular_list(tabs[0])
-    players.update(popular)
     print(f"Total unique players to fetch: {len(players)}")
 
     if not players:
