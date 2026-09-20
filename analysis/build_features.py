@@ -39,6 +39,19 @@ SELL_TAX = 0.05
 FORWARD_HORIZONS = (7, 14, 21, 30)
 
 
+def _pid_keys(df, *extra):
+    """player_id alone isn't a stable key once FC26 and FC27 coexist in the same
+    table -- the scraper assigns numeric ids per-game, and ~85% of FC27 cards
+    happen to reuse an FC26 card's id (confirmed empirically, not a rare edge
+    case). Every groupby/merge keyed on player_id needs game_version folded in
+    too, or a colliding id's two unrelated cards get treated as one continuous
+    price history."""
+    keys = ["player_id", *extra]
+    if "game_version" in df.columns:
+        keys = keys + ["game_version"]
+    return keys
+
+
 def rsi(price, window=14):
     delta = price.diff()
     gain = delta.clip(lower=0)
@@ -53,7 +66,7 @@ def build_price_features(prices, players):
     prices = prices.sort_values(["player_id", "platform", "date"]).reset_index(drop=True)
     prices["price_clean"] = prices["price"].where(prices["price"] >= MIN_TRADEABLE_PRICE)
 
-    g = prices.groupby(["player_id", "platform"], sort=False)["price_clean"]
+    g = prices.groupby(_pid_keys(prices, "platform"), sort=False)["price_clean"]
 
     for w in (3, 7, 14, 30, 60, 90):
         prices[f"ma_{w}"] = g.transform(lambda s, w=w: s.rolling(w, min_periods=max(3, w // 3)).mean())
@@ -73,17 +86,17 @@ def build_price_features(prices, players):
     denom_30 = (prices["roll_max_30"] - prices["roll_min_30"]).replace(0, np.nan)
     prices["season_position_30"] = (prices["price_clean"] - prices["roll_min_30"]) / denom_30
 
-    prices["rsi_14"] = prices.groupby(["player_id", "platform"], sort=False)["price_clean"].transform(
+    prices["rsi_14"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)["price_clean"].transform(
         lambda s: rsi(s, 14)
     )
     prices["macd_norm"] = (prices["ma_7"] - prices["ma_30"]) / prices["ma_30"]
 
-    prices["skew_30"] = prices.groupby(["player_id", "platform"], sort=False)["pct_change_1d"].transform(
+    prices["skew_30"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)["pct_change_1d"].transform(
         lambda s: s.rolling(30, min_periods=10).skew()
     )
 
     prices["tradeable"] = (prices["price"] > 0).astype(float)
-    prices["liquidity_14"] = prices.groupby(["player_id", "platform"], sort=False)["tradeable"].transform(
+    prices["liquidity_14"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)["tradeable"].transform(
         lambda s: s.rolling(14, min_periods=5).mean()
     )
 
@@ -93,15 +106,16 @@ def build_price_features(prices, players):
 
 
 def add_cross_platform(prices):
-    pivot = prices.pivot_table(index=["player_id", "date"], columns="platform", values="price_clean")
+    idx_keys = _pid_keys(prices, "date")
+    pivot = prices.pivot_table(index=idx_keys, columns="platform", values="price_clean")
     pivot = pivot.rename(columns={"pc": "pc_price_same_day", "console": "console_price_same_day"})
     pivot = pivot.reset_index()
 
-    mom = prices.pivot_table(index=["player_id", "date"], columns="platform", values="pct_change_7d")
+    mom = prices.pivot_table(index=idx_keys, columns="platform", values="pct_change_7d")
     mom = mom.rename(columns={"pc": "pc_pct_change_7d_x", "console": "console_pct_change_7d_x"}).reset_index()
 
-    prices = prices.merge(pivot, on=["player_id", "date"], how="left")
-    prices = prices.merge(mom, on=["player_id", "date"], how="left")
+    prices = prices.merge(pivot, on=idx_keys, how="left")
+    prices = prices.merge(mom, on=idx_keys, how="left")
 
     is_pc = prices["platform"] == "pc"
     prices["other_platform_price"] = np.where(is_pc, prices["console_price_same_day"], prices["pc_price_same_day"])
@@ -137,8 +151,11 @@ def _tag_fc26(df):
 
 
 def add_index_context(prices, players):
-    prices = prices.merge(players[["id", "rating", "band"]], left_on="player_id", right_on="id", how="left")
-    prices = prices.drop(columns=["id"])
+    has_gv = "game_version" in prices.columns and "game_version" in players.columns
+    player_cols = ["id", "rating", "band"] + (["game_version"] if has_gv else [])
+    player_meta = players[player_cols].rename(columns={"id": "player_id"})
+    merge_keys = ["player_id", "game_version"] if has_gv else ["player_id"]
+    prices = prices.merge(player_meta, on=merge_keys, how="left")
     prices = _downcast(prices)
 
     indices = _downcast(_tag_fc26(pd.read_parquet(DATA_DIR / "indices_features.parquet")))
@@ -153,7 +170,7 @@ def add_index_context(prices, players):
     del indices
     prices = _downcast(prices)
     prices["price_to_band_index_ratio"] = prices["price_clean"] / prices["band_index_value"]
-    prices["band_ratio_zscore_60d"] = prices.groupby(["player_id", "platform"], sort=False)[
+    prices["band_ratio_zscore_60d"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)[
         "price_to_band_index_ratio"
     ].transform(lambda s: (s - s.rolling(60, min_periods=14).mean()) / s.rolling(60, min_periods=14).std())
     prices = _downcast(prices)
@@ -164,7 +181,7 @@ def add_index_context(prices, players):
     del macro
     prices = _downcast(prices)
     prices["price_to_index100_ratio"] = prices["price_clean"] / prices["index100_index_value"]
-    prices["index100_ratio_zscore_60d"] = prices.groupby(["player_id", "platform"], sort=False)[
+    prices["index100_ratio_zscore_60d"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)[
         "price_to_index100_ratio"
     ].transform(lambda s: (s - s.rolling(60, min_periods=14).mean()) / s.rolling(60, min_periods=14).std())
     prices = _downcast(prices)
@@ -174,7 +191,7 @@ def add_index_context(prices, players):
 
 def add_forward_returns(prices):
     prices = prices.sort_values(["player_id", "platform", "date"])
-    g = prices.groupby(["player_id", "platform"], sort=False)["price_clean"]
+    g = prices.groupby(_pid_keys(prices, "platform"), sort=False)["price_clean"]
     for h in FORWARD_HORIZONS:
         fwd_price = g.transform(lambda s, h=h: s.shift(-h))
         prices[f"fwd_return_{h}d"] = (fwd_price - prices["price_clean"]) / prices["price_clean"]

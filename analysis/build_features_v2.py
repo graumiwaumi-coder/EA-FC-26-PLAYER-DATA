@@ -33,6 +33,17 @@ MIN_RATING = 75
 RELEASE_CAP_DAYS = 60
 
 
+def _pid_keys(df, *extra):
+    """player_id alone isn't a stable key once FC26 and FC27 coexist -- the scraper
+    assigns numeric ids per-game, and ~85% of FC27 cards happen to reuse an FC26
+    card's id (confirmed empirically). Every groupby/merge keyed on player_id needs
+    game_version folded in too, same as build_features.py's identical helper."""
+    keys = ["player_id", *extra]
+    if "game_version" in df.columns:
+        keys = keys + ["game_version"]
+    return keys
+
+
 def load_gold_plus():
     players = pd.read_parquet(DATA_DIR / "players_features.parquet")
     players = players[players["rating"] >= MIN_RATING]
@@ -59,8 +70,9 @@ def load_gold_plus():
 
 def add_release_timing(df):
     first_date_overall = df["date"].min()
-    first_seen = df.groupby("player_id")["date"].min().rename("release_date")
-    df = df.merge(first_seen, on="player_id", how="left")
+    group_cols = _pid_keys(df)
+    first_seen = df.groupby(group_cols)["date"].min().rename("release_date")
+    df = df.merge(first_seen, on=group_cols, how="left")
     cutoff = first_date_overall + pd.Timedelta(days=14)
     is_release_cohort = df["release_date"] > cutoff
     days_since = (df["date"] - df["release_date"]).dt.days.clip(upper=RELEASE_CAP_DAYS)
@@ -77,18 +89,22 @@ def add_trend_slope(df, window, col="price_clean"):
         slope = cov / var
         return slope / s.rolling(window, min_periods=max(5, window // 2)).mean()  # normalize by price level
 
-    return df.groupby(["player_id", "platform"], sort=False)[col].apply(group_slope).reset_index(level=[0, 1], drop=True)
+    group_cols = _pid_keys(df, "platform")
+    return df.groupby(group_cols, sort=False)[col].apply(group_slope).reset_index(
+        level=list(range(len(group_cols))), drop=True
+    )
 
 
 def add_ma_crossover(df):
-    cross = df.groupby(["player_id", "platform"], sort=False).apply(
+    group_cols = _pid_keys(df, "platform")
+    cross = df.groupby(group_cols, sort=False).apply(
         lambda g: (g["ma_7"] > g["ma_30"]).ne((g["ma_7"] > g["ma_30"]).shift(1))
-    ).reset_index(level=[0, 1], drop=True)
+    ).reset_index(level=list(range(len(group_cols))), drop=True)
     df["ma_crossover"] = cross.fillna(False)
 
-    df["_pos"] = df.groupby(["player_id", "platform"], sort=False).cumcount()
+    df["_pos"] = df.groupby(group_cols, sort=False).cumcount()
     df["_cross_pos"] = df["_pos"].where(df["ma_crossover"])
-    df["_last_cross_pos"] = df.groupby(["player_id", "platform"], sort=False)["_cross_pos"].ffill()
+    df["_last_cross_pos"] = df.groupby(group_cols, sort=False)["_cross_pos"].ffill()
     df["days_since_crossover"] = (df["_pos"] - df["_last_cross_pos"]).fillna(999).clip(upper=999)
     df = df.drop(columns=["_pos", "_cross_pos", "_last_cross_pos"])
     return df
@@ -119,7 +135,10 @@ def add_market_beta(df, window=60):
     def group_cov(g):
         return g["pct_change_1d"].rolling(window, min_periods=window // 3).cov(g["mkt_ret_1d"])
 
-    cov = df.groupby(["player_id", "platform"], sort=False).apply(group_cov).reset_index(level=[0, 1], drop=True)
+    pid_group_cols = _pid_keys(df, "platform")
+    cov = df.groupby(pid_group_cols, sort=False).apply(group_cov).reset_index(
+        level=list(range(len(pid_group_cols))), drop=True
+    )
     # same near-zero-variance instability as autocorrelation -- clip defensively.
     # real market betas are rarely beyond a few, so this only catches numerical
     # artifacts, not legitimate signal
@@ -136,7 +155,10 @@ def add_autocorr(df, window=30):
         var = s.rolling(window, min_periods=window // 2).var()
         return cov / var
 
-    ac = df.groupby(["player_id", "platform"], sort=False).apply(group_autocorr).reset_index(level=[0, 1], drop=True)
+    group_cols = _pid_keys(df, "platform")
+    ac = df.groupby(group_cols, sort=False).apply(group_autocorr).reset_index(
+        level=list(range(len(group_cols))), drop=True
+    )
     # true autocorrelation is mathematically bounded in [-1, 1] -- values outside that
     # range are a numerical artifact of dividing by a rolling variance that's too close
     # to zero (a player whose price barely moved in the window), not a real signal

@@ -37,13 +37,20 @@ def main():
     pc["tradeable"] = pc["price"] > 0
     pc["price_nonzero"] = pc["price"].where(pc["price"] > 0)
 
-    per_player = pc.groupby("player_id").agg(
+    # player_id alone isn't a stable key once FC26 and FC27 coexist -- the scraper
+    # assigns numeric ids per-game, and they collide often (~85% of FC27 cards reuse
+    # an FC26 card's id). Without game_version in the grouping/join key, this would
+    # silently blend one card's FC26 price history with a different card's FC27
+    # history just because they happen to share a number.
+    group_cols = ["player_id", "game_version"] if "game_version" in pc.columns else ["player_id"]
+    per_player = pc.groupby(group_cols).agg(
         median_price_pc=("price_nonzero", "median"),
         liquidity_pc=("tradeable", "mean"),
     ).reset_index()
+    per_player = per_player.rename(columns={"player_id": "id"})
 
-    players = players.merge(per_player, left_on="id", right_on="player_id", how="left")
-    players = players.drop(columns=["player_id"])
+    join_cols = ["id", "game_version"] if "game_version" in per_player.columns and "game_version" in players.columns else ["id"]
+    players = players.merge(per_player, on=join_cols, how="left")
 
     players["position_group"] = players["position"].map(POSITION_GROUP)
     players["is_icon"] = players["league"] == "Icons"

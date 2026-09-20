@@ -148,7 +148,19 @@ def find_neighbors(players):
                     break
                 neighbor_rows.append((sub_ids[i], sub_ids[j], rank + 1, dist[i, j]))
 
-    return pd.DataFrame(neighbor_rows, columns=["player_id", "neighbor_id", "rank", "distance"])
+    result = pd.DataFrame(neighbor_rows, columns=["player_id", "neighbor_id", "rank", "distance"])
+    if "game_version" in players.columns:
+        # player_id and neighbor_id are guaranteed to share a game_version within a row
+        # (the "groups" gate above never pairs across game versions), so tagging by
+        # player_id's own game_version is enough -- this just carries that fact forward
+        # as an explicit column so compute_peer_divergence()'s price-panel merges (keyed
+        # on player_id/neighbor_id alone) don't have to trust raw id uniqueness, which
+        # doesn't hold once FC26 and FC27 coexist (~85% of FC27 ids reuse an FC26 id).
+        result = result.merge(
+            players[["id", "game_version"]].rename(columns={"id": "player_id"}),
+            on="player_id", how="left",
+        )
+    return result
 
 
 def compute_peer_divergence(neighbors):
@@ -157,29 +169,39 @@ def compute_peer_divergence(neighbors):
     on that same date."""
     price_cols = ["player_id", "platform", "date", "rating", DIVERGENCE_WINDOW, FORWARD_TARGET]
     dataset = ds.dataset(DATA_DIR / "prices_features.parquet", format="parquet")
+    has_gv = "game_version" in dataset.schema.names and "game_version" in neighbors.columns
+    if has_gv:
+        price_cols = price_cols + ["game_version"]
     table = dataset.to_table(columns=price_cols, filter=ds.field("rating") >= MIN_RATING)
     prices = table.to_pandas(split_blocks=True, self_destruct=True)
     del table
     float_cols = prices.select_dtypes(include=["float64"]).columns
     prices[float_cols] = prices[float_cols].astype("float32")
 
-    own = prices[["player_id", "platform", "date", DIVERGENCE_WINDOW, FORWARD_TARGET]].rename(
-        columns={DIVERGENCE_WINDOW: "own_return"}
-    )
+    own_cols = ["player_id", "platform", "date", DIVERGENCE_WINDOW, FORWARD_TARGET]
+    if has_gv:
+        own_cols = own_cols + ["game_version"]
+    own = prices[own_cols].rename(columns={DIVERGENCE_WINDOW: "own_return"})
 
+    neighbor_price_cols = ["player_id", "platform", "date", DIVERGENCE_WINDOW]
+    if has_gv:
+        neighbor_price_cols = neighbor_price_cols + ["game_version"]
+    neighbor_merge_keys = ["neighbor_id", "game_version"] if has_gv else ["neighbor_id"]
     neighbor_returns = neighbors.merge(
-        prices[["player_id", "platform", "date", DIVERGENCE_WINDOW]].rename(
+        prices[neighbor_price_cols].rename(
             columns={"player_id": "neighbor_id", DIVERGENCE_WINDOW: "neighbor_return"}
         ),
-        on="neighbor_id", how="inner",
+        on=neighbor_merge_keys, how="inner",
     )
+    peer_group_cols = ["player_id", "platform", "date"] + (["game_version"] if has_gv else [])
     peer_avg = (
-        neighbor_returns.groupby(["player_id", "platform", "date"])["neighbor_return"]
+        neighbor_returns.groupby(peer_group_cols)["neighbor_return"]
         .agg(peer_avg_return="mean", n_neighbors_with_data="count")
         .reset_index()
     )
 
-    merged = own.merge(peer_avg, on=["player_id", "platform", "date"], how="inner")
+    own_merge_keys = ["player_id", "platform", "date"] + (["game_version"] if has_gv else [])
+    merged = own.merge(peer_avg, on=own_merge_keys, how="inner")
     merged["peer_divergence"] = merged["own_return"] - merged["peer_avg_return"]
     return merged.dropna(subset=["peer_divergence", FORWARD_TARGET])
 
