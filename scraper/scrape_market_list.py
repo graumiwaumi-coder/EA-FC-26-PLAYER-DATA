@@ -70,12 +70,13 @@ SQUADS = [
     "TeamOfTheWeek1",
 ]
 
-# Buckets cover 10k and up -- below that is cheap fodder, not worth tracking
-# for trading purposes. Keep buckets narrow enough that no single bucket is
-# likely to blow past MAX_PAGES_PER_RANGE; a warning is printed (and the
-# bucket recorded in the log) if one does, so it can be split further later
-# based on real run data.
+# Buckets cover 5k and up -- below that is fodder too cheap to be worth a
+# 5% EA sell tax round-trip even on a bulk flip. Keep buckets narrow enough
+# that no single bucket is likely to blow past MAX_PAGES_PER_RANGE; a
+# warning is printed (and the bucket recorded in the log) if one does, so
+# it can be split further later based on real run data.
 PRICE_RANGES = [
+    (5000, 7500), (7500, 10000),
     (10000, 15000), (15000, 20000),
     (20000, 35000), (35000, 50000), (50000, 75000), (75000, 100000),
     (100000, 150000), (150000, 200000), (200000, 350000), (350000, 500000),
