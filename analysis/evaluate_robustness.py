@@ -67,8 +67,12 @@ def main():
     y_train = df.loc[train_mask, target_clf].astype(int)
     y_test = df.loc[test_mask, target_clf].astype(int)
 
+    # Same tuned hyperparameters as train_model.py (see tune_hyperparameters.py
+    # --full results) so this comparison isn't biased by comparing a tuned
+    # full-feature model against an untuned reduced-feature one.
     clf2 = HistGradientBoostingClassifier(
-        categorical_features=clean_cat_idx, max_iter=300, learning_rate=0.05,
+        categorical_features=clean_cat_idx, max_iter=300, learning_rate=0.02,
+        max_leaf_nodes=15, min_samples_leaf=50, l2_regularization=1.0, max_bins=255,
         early_stopping=True, validation_fraction=0.15, random_state=42,
     )
     clf2.fit(X_train, y_train)

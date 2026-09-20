@@ -137,8 +137,14 @@ def main():
     cat_idx = [ALL_FEATURES.index(c) for c in CATEGORICAL_FEATURES]
 
     print("\nTraining classifier (profitable after tax: yes/no)...")
+    # Hyperparameters below come from tune_hyperparameters.py --full: a 40-combo x
+    # 4-fold walk-forward search, best result AUC=0.768 (vs ~0.75-0.76 with the
+    # previous guessed defaults). Only the classifier was tuned directly (the
+    # search optimized target_clf); the same combo is applied to the regressor
+    # below too since a dedicated regression tuning pass hasn't been run yet.
     clf = HistGradientBoostingClassifier(
-        categorical_features=cat_idx, max_iter=300, learning_rate=0.05,
+        categorical_features=cat_idx, max_iter=300, learning_rate=0.02,
+        max_leaf_nodes=15, min_samples_leaf=50, l2_regularization=1.0, max_bins=255,
         early_stopping=True, validation_fraction=0.15, random_state=42,
     )
     clf.fit(X_train, y_train_clf)
@@ -162,7 +168,8 @@ def main():
 
     print("\nTraining regressor (expected % return)...")
     reg = HistGradientBoostingRegressor(
-        categorical_features=cat_idx, max_iter=300, learning_rate=0.05,
+        categorical_features=cat_idx, max_iter=300, learning_rate=0.02,
+        max_leaf_nodes=15, min_samples_leaf=50, l2_regularization=1.0, max_bins=255,
         early_stopping=True, validation_fraction=0.15, random_state=42,
     )
     reg.fit(X_train, y_train_reg)
