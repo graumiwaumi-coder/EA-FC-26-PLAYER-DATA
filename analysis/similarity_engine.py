@@ -94,7 +94,13 @@ def pairwise_playstyle_distance(playstyle_sets):
 
 def find_neighbors(players):
     """For every player, the K nearest players within the same position_group
-    and rating window, ranked by weighted numeric distance + playstyle overlap."""
+    and rating window, ranked by weighted numeric distance + playstyle overlap.
+
+    Once players_features.parquet includes FC27 as well as FC26, this also has to
+    hard-gate on game_version -- an FC27 player's statistical "peers" should be
+    other FC27 players, not FC26 ones from a different economy and time period.
+    Folded into the existing position_group grouping (below) rather than a
+    separate pass, since both are just hard gates applied the same way."""
     # standardize numeric features once, globally, so distances are comparable.
     # Fill missing values (e.g. ~450 players have no recorded age) with the
     # column median rather than leaving NaN, which would silently poison every
@@ -112,7 +118,10 @@ def find_neighbors(players):
 
     ids = players["id"].to_numpy()
     ratings = players["rating"].to_numpy()
-    groups = players["position_group"].to_numpy()
+    if "game_version" in players.columns:
+        groups = (players["position_group"].astype(str) + "_" + players["game_version"].astype(str)).to_numpy()
+    else:
+        groups = players["position_group"].to_numpy()
     playstyle_sets = players["playstyle_set"].tolist()
 
     neighbor_rows = []

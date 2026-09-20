@@ -25,6 +25,8 @@ import numpy as np
 import pandas as pd
 import pyarrow.dataset as ds
 
+from build_features import _fc26_only_join_keys, _tag_fc26
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 MIN_RATING = 75
@@ -40,6 +42,11 @@ def load_gold_plus():
             "index100_index_value", "index100_idx_pct_change_7d",
             "fwd_return_21d_net_tax", "fwd_up_21d_net_tax"]
     dataset = ds.dataset(DATA_DIR / "prices_features.parquet", format="parquet")
+    # game_version has to survive this column selection -- it's not just metadata, it's
+    # needed below (cross_sectional_rank, market beta, relative_strength) to stop an FC27
+    # row from being grouped/joined against FC26 rows that happen to share a date.
+    if "game_version" in dataset.schema.names:
+        cols = cols + ["game_version"]
     table = dataset.to_table(columns=cols, filter=ds.field("rating") >= MIN_RATING)
     df = table.to_pandas(split_blocks=True, self_destruct=True)
     del table
@@ -88,15 +95,26 @@ def add_ma_crossover(df):
 
 
 def add_cross_sectional_rank(df):
-    df["cross_sectional_rank"] = df.groupby(["date", "platform", "rating"], sort=False)["price_clean"].rank(pct=True)
+    # rank against peers on the same date/platform/rating -- without game_version an FC27
+    # card could get ranked against FC26 cards that happen to share a calendar date, which
+    # is a different economy entirely.
+    group_cols = ["date", "platform", "rating"]
+    if "game_version" in df.columns:
+        group_cols = group_cols + ["game_version"]
+    df["cross_sectional_rank"] = df.groupby(group_cols, sort=False)["price_clean"].rank(pct=True)
     return df
 
 
 def add_market_beta(df, window=60):
-    mkt = df[["platform", "date", "index100_index_value"]].drop_duplicates(subset=["platform", "date"]).sort_values(["platform", "date"])
-    mkt["mkt_ret_1d"] = mkt.groupby("platform", sort=False)["index100_index_value"].pct_change(1)
-    mkt["mkt_var_w"] = mkt.groupby("platform", sort=False)["mkt_ret_1d"].transform(lambda s: s.rolling(window, min_periods=window // 3).var())
-    df = df.merge(mkt[["platform", "date", "mkt_ret_1d", "mkt_var_w"]], on=["platform", "date"], how="left")
+    # index100_index_value is duplicated across every player row on a given (platform,
+    # date[, game_version]); dedup back down to one market-return series per group before
+    # computing returns, keeping FC26 and FC27's market series separate if both are present.
+    key_cols = ["platform", "game_version"] if "game_version" in df.columns else ["platform"]
+    dedup_cols = key_cols + ["date"]
+    mkt = df[dedup_cols + ["index100_index_value"]].drop_duplicates(subset=dedup_cols).sort_values(dedup_cols)
+    mkt["mkt_ret_1d"] = mkt.groupby(key_cols, sort=False)["index100_index_value"].pct_change(1)
+    mkt["mkt_var_w"] = mkt.groupby(key_cols, sort=False)["mkt_ret_1d"].transform(lambda s: s.rolling(window, min_periods=window // 3).var())
+    df = df.merge(mkt[dedup_cols + ["mkt_ret_1d", "mkt_var_w"]], on=dedup_cols, how="left")
 
     def group_cov(g):
         return g["pct_change_1d"].rolling(window, min_periods=window // 3).cov(g["mkt_ret_1d"])
@@ -127,10 +145,14 @@ def add_autocorr(df, window=30):
 
 
 def add_relative_strength(df):
-    dataset = ds.dataset(DATA_DIR / "indices_features.parquet", format="parquet")
-    idx = dataset.to_table(columns=["band", "platform", "date", "idx_pct_change_7d"]).to_pandas()
+    # indices_features.parquet is fc26-only and predates the FC26/FC27 distinction (same
+    # issue as build_features.py's add_index_context) -- tag it and require game_version
+    # in the join key so an FC27 row gets NaN instead of a wrong FC26 match.
+    idx = _tag_fc26(pd.read_parquet(DATA_DIR / "indices_features.parquet",
+                                     columns=["band", "platform", "date", "idx_pct_change_7d"]))
     idx = idx.rename(columns={"idx_pct_change_7d": "band_momentum_check"})
-    df = df.merge(idx, on=["band", "platform", "date"], how="left")
+    join_keys = _fc26_only_join_keys(df, ["band", "platform", "date"])
+    df = df.merge(idx[join_keys + ["band_momentum_check"]], on=join_keys, how="left")
     df["relative_strength"] = df["band_idx_pct_change_7d"] - df["index100_idx_pct_change_7d"]
     df = df.drop(columns=["band_momentum_check"])
     return df

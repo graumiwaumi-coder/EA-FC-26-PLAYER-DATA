@@ -99,24 +99,48 @@ def add_cross_platform(prices):
     return prices
 
 
+def _fc26_only_join_keys(prices, base_keys):
+    """indices.parquet/indices_features.parquet/macro_wide.parquet predate the FC26/FC27
+    distinction and have no FC27 equivalent yet -- band/platform/date alone isn't a safe
+    join key once two games' data coexist in the same table (an FC27 row could silently
+    borrow an FC26 index value just because the calendar date happens to coincide).
+    Tags the index side as game_version="fc26" and, if `prices` has a game_version
+    column, requires it in the join key too, so an FC27 row simply gets no match (NaN,
+    correct) instead of a wrong cross-game one. If `prices` has no game_version column
+    at all (pre-FC27 pipeline runs), joins on the base keys alone -- unambiguous since
+    only FC26 data exists in that case."""
+    if "game_version" in prices.columns:
+        return base_keys + ["game_version"]
+    return base_keys
+
+
+def _tag_fc26(df):
+    df = df.copy()
+    df["game_version"] = "fc26"
+    return df
+
+
 def add_index_context(prices, players):
     prices = prices.merge(players[["id", "rating", "band"]], left_on="player_id", right_on="id", how="left")
     prices = prices.drop(columns=["id"])
 
-    indices = pd.read_parquet(DATA_DIR / "indices_features.parquet")
-    idx_cols = ["band", "platform", "date", "index_value", "idx_pct_change_7d", "idx_pct_change_14d",
-                "idx_pct_change_30d", "idx_momentum_pctile_90"]
+    indices = _tag_fc26(pd.read_parquet(DATA_DIR / "indices_features.parquet"))
+    base_keys = ["band", "platform", "date"]
+    join_keys = _fc26_only_join_keys(prices, base_keys)
+    idx_cols = ["band", "platform", "date", "game_version", "index_value", "idx_pct_change_7d",
+                "idx_pct_change_14d", "idx_pct_change_30d", "idx_momentum_pctile_90"]
     prices = prices.merge(
-        indices[idx_cols].rename(columns={c: f"band_{c}" for c in idx_cols if c not in ("band", "platform", "date")}),
-        on=["band", "platform", "date"], how="left",
+        indices[idx_cols].rename(columns={c: f"band_{c}" for c in idx_cols if c not in join_keys}),
+        on=join_keys, how="left",
     )
     prices["price_to_band_index_ratio"] = prices["price_clean"] / prices["band_index_value"]
     prices["band_ratio_zscore_60d"] = prices.groupby(["player_id", "platform"], sort=False)[
         "price_to_band_index_ratio"
     ].transform(lambda s: (s - s.rolling(60, min_periods=14).mean()) / s.rolling(60, min_periods=14).std())
 
-    macro = pd.read_parquet(DATA_DIR / "macro_wide.parquet")
-    prices = prices.merge(macro, on=["platform", "date"], how="left")
+    macro = _tag_fc26(pd.read_parquet(DATA_DIR / "macro_wide.parquet"))
+    join_keys_macro = _fc26_only_join_keys(prices, ["platform", "date"])
+    prices = prices.merge(macro, on=join_keys_macro, how="left")
     prices["price_to_index100_ratio"] = prices["price_clean"] / prices["index100_index_value"]
     prices["index100_ratio_zscore_60d"] = prices.groupby(["player_id", "platform"], sort=False)[
         "price_to_index100_ratio"

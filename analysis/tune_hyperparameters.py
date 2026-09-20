@@ -35,7 +35,12 @@ PLAYER_LEVEL_NUMERIC = ["skills", "weak_foot", "height_cm", "age", "n_playstyles
 
 
 def load_combined_data():
+    # Same as train_model.py's load_data(): training uses ONLY the mature FC26
+    # season, now that players.parquet/prices_long.parquet (and everything built
+    # from them) also carry FC27 rows -- see train_model.py for the full rationale.
     players = pd.read_parquet(DATA_DIR / "players_features.parquet")
+    if "game_version" in players.columns:
+        players = players[players["game_version"] == "fc26"]
     players = players[players["rating"] >= MIN_RATING]
     player_cols = ["id"] + [c for c in CATEGORICAL_FEATURES if c != "platform"] + PLAYER_LEVEL_NUMERIC
     players_sub = players[player_cols]
@@ -44,7 +49,10 @@ def load_combined_data():
     price_cols = list(dict.fromkeys(price_native + ["player_id", "platform", "date", "rating",
                       f"fwd_return_{HORIZON}d_net_tax", f"fwd_up_{HORIZON}d_net_tax"]))
     dataset = ds.dataset(DATA_DIR / "prices_features.parquet", format="parquet")
-    table = dataset.to_table(columns=price_cols, filter=ds.field("rating") >= MIN_RATING)
+    row_filter = ds.field("rating") >= MIN_RATING
+    if "game_version" in dataset.schema.names:
+        row_filter = row_filter & (ds.field("game_version") == "fc26")
+    table = dataset.to_table(columns=price_cols, filter=row_filter)
     df = table.to_pandas(split_blocks=True, self_destruct=True)
     del table
 
@@ -56,6 +64,8 @@ def load_combined_data():
                            columns=["player_id", "platform", "date"] + SIMILARITY_FEATURES)
     df = df.merge(sim, on=["player_id", "platform", "date"], how="left")
 
+    # safe on (platform, date) alone -- df is already fc26-only from the arrow filter
+    # above, and market_volatility_regime.parquet is entirely fc26 (see train_model.py)
     regime = pd.read_parquet(DATA_DIR / "market_volatility_regime.parquet",
                               columns=["platform", "date", "rolling_vol"])
     regime = regime.rename(columns={"rolling_vol": "market_volatility_regime"})

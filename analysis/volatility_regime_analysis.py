@@ -50,7 +50,12 @@ def build_regime_series():
                                labels=["LOW", "MEDIUM", "HIGH"])
     print(f"Regime tercile cutoffs (rolling {ROLLING_WINDOW}d std of Index100 daily return): "
           f"LOW<{terciles[0]:.4f}, MEDIUM<{terciles[1]:.4f}, HIGH>={terciles[1]:.4f}")
-    return idx100[["platform", "date", "rolling_vol", "regime"]]
+    # indices.parquet predates the FC26/FC27 distinction and has no FC27 equivalent yet --
+    # tag explicitly so the merge in main() can require game_version to match instead of
+    # joining on platform/date alone, which would let an FC27 row silently borrow an FC26
+    # regime value just because the calendar date happens to coincide.
+    idx100["game_version"] = "fc26"
+    return idx100[["platform", "date", "game_version", "rolling_vol", "regime"]]
 
 
 def make_clf(cat_idx):
@@ -72,7 +77,8 @@ def main():
     target_clf = f"fwd_up_{HORIZON}d_net_tax"
     target_reg = f"fwd_return_{HORIZON}d_net_tax"
     df = df.dropna(subset=[target_clf, target_reg])
-    df = df.merge(regime, on=["platform", "date"], how="left")
+    join_keys = ["platform", "date", "game_version"] if "game_version" in df.columns else ["platform", "date"]
+    df = df.merge(regime, on=join_keys, how="left")
     print(f"Rows with a regime label: {df['regime'].notna().sum()} / {len(df)}")
 
     cat_idx = [ALL_FEATURES.index(c) for c in CATEGORICAL_FEATURES]

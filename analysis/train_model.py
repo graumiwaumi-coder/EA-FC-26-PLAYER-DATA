@@ -88,7 +88,14 @@ ALL_FEATURES = (NUMERIC_FEATURES + NEW_FEATURES + SIMILARITY_FEATURES + REGIME_F
 
 
 def load_data():
+    # Training uses ONLY the mature, complete FC26 season -- players.parquet and
+    # prices_long.parquet (and everything built from them) now also carry FC27 rows
+    # (build_live_dataset.py merges both in), so this filter has to be explicit rather
+    # than relying on "the file only has FC26 in it" like before. FC27's live scoring
+    # uses a separate loader (not this one) that does the opposite filter.
     players = pd.read_parquet(DATA_DIR / "players_features.parquet")
+    if "game_version" in players.columns:
+        players = players[players["game_version"] == "fc26"]
     players = players[players["rating"] >= MIN_RATING]
     player_cols = ["id", "position", "position_group", "league", "nation", "foot", "body_type",
                    "is_icon", "skills", "weak_foot", "height_cm", "age", "n_playstyles",
@@ -120,7 +127,10 @@ def load_data():
     # filter at the Arrow level (rating >= MIN_RATING) BEFORE materializing a pandas
     # frame -- filtering after a full pandas load is what crashed this on 16.8M rows.
     dataset = ds.dataset(DATA_DIR / "prices_features.parquet", format="parquet")
-    table = dataset.to_table(columns=price_cols, filter=ds.field("rating") >= MIN_RATING)
+    row_filter = ds.field("rating") >= MIN_RATING
+    if "game_version" in dataset.schema.names:
+        row_filter = row_filter & (ds.field("game_version") == "fc26")
+    table = dataset.to_table(columns=price_cols, filter=row_filter)
     prices = table.to_pandas(split_blocks=True, self_destruct=True)
     del table
 
@@ -133,7 +143,13 @@ def load_data():
     prices = prices.merge(sim, on=["player_id", "platform", "date"], how="left")
 
     # market-wide, not per-player -- keyed on (platform, date) only, applies to
-    # every player trading on that platform on that date equally
+    # every player trading on that platform on that date equally. Unlike v2/sim
+    # above this has no player_id in its key, so it can't rely on player_id alone
+    # to rule out cross-game collisions the way those merges can -- but `prices`
+    # is already filtered to game_version=="fc26" by the arrow filter above, and
+    # market_volatility_regime.parquet is entirely fc26 (built from the fc26-only
+    # indices.parquet), so a plain (platform, date) join is safe here without
+    # needing to thread game_version through it too.
     regime = pd.read_parquet(DATA_DIR / "market_volatility_regime.parquet",
                               columns=["platform", "date", "rolling_vol"])
     regime = regime.rename(columns={"rolling_vol": "market_volatility_regime"})
