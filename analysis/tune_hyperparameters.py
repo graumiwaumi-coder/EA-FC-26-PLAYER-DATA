@@ -24,9 +24,8 @@ import pyarrow.dataset as ds
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from train_model import (NUMERIC_FEATURES, NEW_FEATURES, SIMILARITY_FEATURES, PROMO_EARLY_DAYS,
-                          CATEGORICAL_FEATURES, MIN_RATING, HORIZON, TRAIN_WINDOW_DAYS,
-                          ALL_FEATURES, make_folds)
+from train_model import (NUMERIC_FEATURES, NEW_FEATURES, SIMILARITY_FEATURES, CATEGORICAL_FEATURES,
+                          MIN_RATING, HORIZON, TRAIN_WINDOW_DAYS, ALL_FEATURES, make_folds)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -38,11 +37,7 @@ PLAYER_LEVEL_NUMERIC = ["skills", "weak_foot", "height_cm", "age", "n_playstyles
 def load_combined_data():
     players = pd.read_parquet(DATA_DIR / "players_features.parquet")
     players = players[players["rating"] >= MIN_RATING]
-    # platform and promo_cluster are categorical features that don't live in
-    # players_features.parquet -- platform isn't a player attribute, promo_cluster
-    # comes from the separate per-(player,platform) promo prediction merge below.
-    player_cols = ["id"] + [c for c in CATEGORICAL_FEATURES if c not in ("platform", "promo_cluster")] \
-        + PLAYER_LEVEL_NUMERIC
+    player_cols = ["id"] + [c for c in CATEGORICAL_FEATURES if c != "platform"] + PLAYER_LEVEL_NUMERIC
     players_sub = players[player_cols]
 
     price_native = [c for c in NUMERIC_FEATURES if c != "rating" and c not in PLAYER_LEVEL_NUMERIC]
@@ -60,12 +55,6 @@ def load_combined_data():
     sim = pd.read_parquet(DATA_DIR / "peer_divergence.parquet",
                            columns=["player_id", "platform", "date"] + SIMILARITY_FEATURES)
     df = df.merge(sim, on=["player_id", "platform", "date"], how="left")
-
-    promo = pd.read_parquet(DATA_DIR / "promo_early_prediction.parquet")
-    df = df.merge(promo, on=["player_id", "platform"], how="left")
-    not_yet_known = df["days_since_release"] < PROMO_EARLY_DAYS
-    df.loc[not_yet_known, "promo_cluster"] = None
-    df.loc[not_yet_known, "promo_cluster_confidence"] = np.nan
 
     float_cols = df.select_dtypes(include=["float64"]).columns
     df[float_cols] = df[float_cols].astype("float32")
