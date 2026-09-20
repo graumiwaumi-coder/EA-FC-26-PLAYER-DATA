@@ -24,15 +24,11 @@ import pyarrow.dataset as ds
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from train_model import NUMERIC_FEATURES, CATEGORICAL_FEATURES, MIN_RATING, HORIZON
+from train_model import NUMERIC_FEATURES, NEW_FEATURES, CATEGORICAL_FEATURES, MIN_RATING, HORIZON
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 EMBARGO_DAYS = HORIZON
 TRAIN_WINDOW_DAYS = 200
-
-NEW_FEATURES = ["days_since_release", "trend_slope_14d", "trend_slope_30d", "ma_crossover",
-                "days_since_crossover", "cross_sectional_rank", "beta_60d", "autocorr_30d",
-                "relative_strength"]
 
 PLAYER_LEVEL_NUMERIC = ["skills", "weak_foot", "height_cm", "age", "n_playstyles",
                         "league_price_score", "league_liquidity_score", "club_price_score",

@@ -58,7 +58,14 @@ NUMERIC_FEATURES = [
 ]
 CATEGORICAL_FEATURES = ["platform", "position", "position_group", "league", "nation",
                          "foot", "body_type", "is_icon"]
-ALL_FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+# The finance-inspired features from build_features_v2.py -- these were part of the
+# 82-feature set tune_hyperparameters.py --full actually tuned against, so they need
+# to be here too or the tuned hyperparameters are being applied to a different
+# (smaller) feature set than the one they were tuned for.
+NEW_FEATURES = ["days_since_release", "trend_slope_14d", "trend_slope_30d", "ma_crossover",
+                "days_since_crossover", "cross_sectional_rank", "beta_60d", "autocorr_30d",
+                "relative_strength"]
+ALL_FEATURES = NUMERIC_FEATURES + NEW_FEATURES + CATEGORICAL_FEATURES
 
 
 def load_data():
@@ -97,6 +104,10 @@ def load_data():
     table = dataset.to_table(columns=price_cols, filter=ds.field("rating") >= MIN_RATING)
     prices = table.to_pandas(split_blocks=True, self_destruct=True)
     del table
+
+    v2 = pd.read_parquet(DATA_DIR / "prices_features_v2.parquet",
+                          columns=["player_id", "platform", "date"] + NEW_FEATURES)
+    prices = prices.merge(v2, on=["player_id", "platform", "date"], how="left")
 
     # downcast to float32 to keep memory manageable
     float_cols = prices.select_dtypes(include=["float64"]).columns
