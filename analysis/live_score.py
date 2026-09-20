@@ -28,6 +28,7 @@ import joblib
 import pyarrow.dataset as ds
 
 from train_model import (NUMERIC_FEATURES, NEW_FEATURES, SIMILARITY_FEATURES, HORIZON, MIN_RATING)
+import predictions_db
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -41,7 +42,13 @@ PLAYER_LEVEL_NUMERIC = ["skills", "weak_foot", "height_cm", "age", "n_playstyles
 def load_latest_fc27_snapshot():
     """One row per (player_id, platform): whichever date is most recent for that pair."""
     price_native = [c for c in NUMERIC_FEATURES if c not in PLAYER_LEVEL_NUMERIC]
-    price_cols = list(dict.fromkeys(price_native + ["player_id", "platform", "date", "rating"]))
+    # price_clean and game_version aren't model features but are needed to record each
+    # prediction (price_clean as the "what it cost when we predicted this" baseline for
+    # later grading; game_version so the DB record is unambiguous even though this whole
+    # snapshot is fc27-filtered already).
+    price_cols = list(dict.fromkeys(
+        price_native + ["player_id", "platform", "date", "rating", "price_clean", "game_version"]
+    ))
 
     dataset = ds.dataset(DATA_DIR / "prices_features.parquet", format="parquet")
     if "game_version" not in dataset.schema.names:
@@ -123,6 +130,19 @@ def main():
     out_path = DATA_DIR / "live_fc27_predictions.csv"
     result.to_csv(out_path, index=False)
     print(f"\nSaved {out_path}")
+
+    print("\nStoring predictions for later grading (predictions.db)...")
+    db_rows = latest[["player_id", "platform", "game_version", "url", "rating", "position",
+                       "club", "league", "date", "price_clean", "predicted_win_prob",
+                       "predicted_return_21d"]].rename(columns={"date": "snapshot_date"}).copy()
+    db_rows["scored_at"] = pd.Timestamp.now().isoformat()
+    db_rows["horizon_days"] = HORIZON
+    db_rows["eval_date"] = (db_rows["snapshot_date"] + pd.Timedelta(days=HORIZON)).dt.strftime("%Y-%m-%d")
+    db_rows["snapshot_date"] = db_rows["snapshot_date"].dt.strftime("%Y-%m-%d")
+    db_rows = db_rows.rename(columns={"price_clean": "price_at_snapshot"})
+    n_new = predictions_db.insert_predictions(db_rows)
+    print(f"{n_new} new predictions recorded ({len(db_rows) - n_new} were re-scores of snapshots "
+          f"already on record, skipped)")
 
     print("\n=== Top 20 by predicted win probability ===")
     print(result.head(20).to_string(index=False))
