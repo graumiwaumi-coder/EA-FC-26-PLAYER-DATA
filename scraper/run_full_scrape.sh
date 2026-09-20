@@ -4,10 +4,10 @@
 # train on. Sequential on purpose -- never run these concurrently with each
 # other or anything else heavy (the 11GB VPS has no swap; see PROJECT.md).
 #
-# Run: bash run_full_scrape.sh [num_tabs]   (defaults to 6)
+# Run: bash run_full_scrape.sh [num_tabs]   (defaults to 3)
 set -e
 cd "$(dirname "$0")"
-NUM_TABS="${1:-6}"
+NUM_TABS="${1:-3}"
 
 echo "=== 1/4: market list (player universe + live prices) ==="
 xvfb-run -a python3 scrape_market_list.py "$NUM_TABS"
