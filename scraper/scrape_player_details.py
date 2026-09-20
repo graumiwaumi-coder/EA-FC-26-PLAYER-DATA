@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Per-player sales-history + daily/live sale-price chart scraper for every
-player discovered by scrape_market_list.py. The player universe is
-strictly that filtered market-player-list output -- we do NOT additionally
-pull in /27/popular here, so a player only gets scraped if they showed up
-in the filtered market list.
+player discovered by scrape_market_list.py, plus the FC27 Popular players
+list (https://www.futbin.com/27/popular) for anything not already covered
+by a market-list price bucket or squad.
 
 (Meta + full price-history + current price live on the player's own page --
 that's scrape_player_history.py, run separately. This script is purely the
@@ -25,6 +24,10 @@ Confirmed page structure (inspected directly in DevTools, 2026-09):
       currently simulate scrolling the scrollable history box to force more
       to load (unconfirmed whether that's needed -- flag if row counts look
       suspiciously low vs. what the site shows visually).
+
+  /27/popular
+    a.playercard-wrapper[href^="/27/player/"] -> id + slug, same pattern as
+    the market-list player links.
 
 NOTE: this has NOT been confirmed to hit a JSON API under the hood -- it
 scrapes the rendered page directly for every player x platform, which is
@@ -54,6 +57,7 @@ SCRAPES_DIR = SCRIPT_DIR / "scrapes"
 SCRAPES_DIR.mkdir(exist_ok=True)
 
 BASE = "https://www.futbin.com"
+POPULAR_URL = f"{BASE}/27/popular"
 
 NUM_TABS = int(sys.argv[1]) if len(sys.argv) > 1 else 6
 PLATFORMS = ["ps", "pc"]
@@ -105,6 +109,13 @@ SALES_EXTRACT_JS = """
         });
     }
     return JSON.stringify({ daily, live, history, n_history_rows: history.length });
+})()
+"""
+
+POPULAR_EXTRACT_JS = """
+(() => {
+    const links = document.querySelectorAll('a.playercard-wrapper[href^="/27/player/"]');
+    return JSON.stringify(Array.from(links).map(a => a.getAttribute('href')));
 })()
 """
 
@@ -181,6 +192,18 @@ async def poll_for(tab, js, is_ready, default, max_wait=MAX_WAIT_SECONDS):
     return result
 
 
+async def scrape_popular_list(tab):
+    await tab.get(POPULAR_URL)
+    hrefs = await poll_for(tab, POPULAR_EXTRACT_JS, lambda r: bool(r), [])
+    players = {}
+    for href in hrefs:
+        pid, slug = parse_id_slug(href)
+        if pid is not None:
+            players[pid] = slug
+    print(f"  {len(players)} unique players from /27/popular")
+    return players
+
+
 async def fetch_sales_page(tab, pid, slug, platform):
     """One player x one platform's sales-history page. Swap this out first
     if a JSON API is ever confirmed to exist -- see module docstring."""
@@ -250,7 +273,10 @@ async def main():
     browser, tabs = await launch_browser()
     print(f"Launched {len(tabs)} tabs")
 
-    all_players = load_market_players()
+    market_players = load_market_players()
+    popular_players = await scrape_popular_list(tabs[0])
+    all_players = dict(market_players)
+    all_players.update(popular_players)
     print(f"Total unique players: {len(all_players)}")
 
     jobs = deque()
