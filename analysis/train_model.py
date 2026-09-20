@@ -72,6 +72,10 @@ NEW_FEATURES = ["days_since_release", "trend_slope_14d", "trend_slope_30d", "ma_
 # Task A -- similarity_engine.py's pairs-trading signal: how far a player's recent
 # return has diverged from its K nearest statistical peers' average recent return.
 SIMILARITY_FEATURES = ["peer_divergence", "n_neighbors_with_data"]
+# Task E -- volatility_regime_analysis.py's market-wide (not per-player) volatility
+# signal: rolling 14d std of Index100's daily return. Found to correlate with AUC
+# (higher regime -> more reliable predictions) pooled across all 4 folds.
+REGIME_FEATURES = ["market_volatility_regime"]
 # Task B's promo_cluster/promo_cluster_confidence (see promo_trajectory_clustering.py)
 # were tried here and reverted: averaged AUC was flat but the deployed model's
 # high-confidence predictions got meaningfully less reliable (prob>=0.8 win rate
@@ -79,7 +83,8 @@ SIMILARITY_FEATURES = ["peer_divergence", "n_neighbors_with_data"]
 # early in a promo card's life, and goes stale by the time later test periods roll
 # around. The clustering + early-shape-prediction analysis itself is still valid and
 # kept in promo_trajectory_clustering.py; it just isn't fed into this model.
-ALL_FEATURES = NUMERIC_FEATURES + NEW_FEATURES + SIMILARITY_FEATURES + CATEGORICAL_FEATURES
+ALL_FEATURES = (NUMERIC_FEATURES + NEW_FEATURES + SIMILARITY_FEATURES + REGIME_FEATURES
+                 + CATEGORICAL_FEATURES)
 
 
 def load_data():
@@ -126,6 +131,13 @@ def load_data():
     sim = pd.read_parquet(DATA_DIR / "peer_divergence.parquet",
                            columns=["player_id", "platform", "date"] + SIMILARITY_FEATURES)
     prices = prices.merge(sim, on=["player_id", "platform", "date"], how="left")
+
+    # market-wide, not per-player -- keyed on (platform, date) only, applies to
+    # every player trading on that platform on that date equally
+    regime = pd.read_parquet(DATA_DIR / "market_volatility_regime.parquet",
+                              columns=["platform", "date", "rolling_vol"])
+    regime = regime.rename(columns={"rolling_vol": "market_volatility_regime"})
+    prices = prices.merge(regime, on=["platform", "date"], how="left")
 
     # downcast to float32 to keep memory manageable
     float_cols = prices.select_dtypes(include=["float64"]).columns

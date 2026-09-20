@@ -64,6 +64,8 @@ def make_clf(cat_idx):
 def main():
     print("Building market volatility regime series from Index100...")
     regime = build_regime_series()
+    regime.to_parquet(DATA_DIR / "market_volatility_regime.parquet", index=False)
+    print(f"Saved {DATA_DIR / 'market_volatility_regime.parquet'} for reuse as a model feature")
 
     print("Loading data and merging regime labels...")
     df = load_data()

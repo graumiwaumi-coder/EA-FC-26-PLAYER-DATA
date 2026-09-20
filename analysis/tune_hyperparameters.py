@@ -56,6 +56,11 @@ def load_combined_data():
                            columns=["player_id", "platform", "date"] + SIMILARITY_FEATURES)
     df = df.merge(sim, on=["player_id", "platform", "date"], how="left")
 
+    regime = pd.read_parquet(DATA_DIR / "market_volatility_regime.parquet",
+                              columns=["platform", "date", "rolling_vol"])
+    regime = regime.rename(columns={"rolling_vol": "market_volatility_regime"})
+    df = df.merge(regime, on=["platform", "date"], how="left")
+
     float_cols = df.select_dtypes(include=["float64"]).columns
     df[float_cols] = df[float_cols].astype("float32")
     df = df.merge(players_sub, left_on="player_id", right_on="id", how="left").drop(columns=["id"])
