@@ -32,7 +32,6 @@ import pyarrow.dataset as ds
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import silhouette_score
-from sklearn.model_selection import train_test_split
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -123,25 +122,41 @@ def describe_clusters(wide, labels, meta):
 def early_shape_classifier(result):
     """The actually useful test: using only the first EARLY_DAYS days (which is
     all you'd have for a brand-new release) plus rating/position, how well can
-    we predict which of the full-30-day clusters a card is heading toward?"""
+    we predict which of the full-30-day clusters a card is heading toward?
+
+    Predictions used as a feature for the MAIN model are generated via
+    cross_val_predict (out-of-fold) rather than clf.predict on its own training
+    rows -- a model scoring its own memorized training data would make this
+    feature look more informative in the main model's historical training than
+    it will actually be on a truly new release. The final clf saved for live use
+    is refit on all the data, which is fine there since nothing downstream of
+    it during real use was part of ITS training set."""
+    from sklearn.model_selection import cross_val_predict
+
     early_cols = list(range(0, EARLY_DAYS + 1))
     feature_cols = early_cols + ["rating_meta"]
     pos_dummies = pd.get_dummies(result["position_group"], prefix="pos")
     X = pd.concat([result[feature_cols].reset_index(drop=True), pos_dummies.reset_index(drop=True)], axis=1)
     X.columns = X.columns.astype(str)
-    y = result["cluster"]
+    y = result["cluster"].reset_index(drop=True)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
     clf = RandomForestClassifier(n_estimators=300, max_depth=6, random_state=42, n_jobs=-1)
-    clf.fit(X_train, y_train)
-    acc = clf.score(X_test, y_test)
-    baseline = y_test.value_counts(normalize=True).max()
+    oof_pred = cross_val_predict(clf, X, y, cv=5, method="predict")
+    oof_proba = cross_val_predict(clf, X, y, cv=5, method="predict_proba")
+    acc = (oof_pred == y.to_numpy()).mean()
+    baseline = y.value_counts(normalize=True).max()
     print(f"\n=== Early-shape classifier (days 0-{EARLY_DAYS} + rating + position only) ===")
-    print(f"Test accuracy: {acc:.1%}  (baseline/always-guess-largest-cluster: {baseline:.1%})")
+    print(f"5-fold out-of-fold accuracy: {acc:.1%}  (baseline/always-guess-largest-cluster: {baseline:.1%})")
+
+    clf.fit(X, y)  # final model for live use, refit on everything
     importances = pd.Series(clf.feature_importances_, index=X.columns).sort_values(ascending=False)
     print("Top predictive features:")
     print(importances.head(8))
-    return clf
+
+    predictions = result[["player_id", "platform"]].copy()
+    predictions["promo_cluster"] = oof_pred.astype(str)  # categorical -- cluster ids aren't ordered
+    predictions["promo_cluster_confidence"] = oof_proba.max(axis=1)
+    return clf, predictions
 
 
 def main():
@@ -159,12 +174,14 @@ def main():
     )
     result = describe_clusters(wide, labels, meta)
 
-    clf = early_shape_classifier(result)
+    clf, predictions = early_shape_classifier(result)
 
     result[["player_id", "platform", "cluster"]].to_parquet(DATA_DIR / "promo_clusters.parquet", index=False)
+    predictions.to_parquet(DATA_DIR / "promo_early_prediction.parquet", index=False)
     import joblib
     joblib.dump(clf, (DATA_DIR / "models" / "promo_early_shape_clf.joblib"))
-    print("\nSaved promo_clusters.parquet and models/promo_early_shape_clf.joblib")
+    print("\nSaved promo_clusters.parquet, promo_early_prediction.parquet, "
+          "and models/promo_early_shape_clf.joblib")
 
 
 if __name__ == "__main__":

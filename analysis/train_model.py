@@ -61,7 +61,7 @@ NUMERIC_FEATURES = [
     "club_liquidity_score", "nation_price_score", "nation_liquidity_score",
 ]
 CATEGORICAL_FEATURES = ["platform", "position", "position_group", "league", "nation",
-                         "foot", "body_type", "is_icon"]
+                         "foot", "body_type", "is_icon", "promo_cluster"]
 # The finance-inspired features from build_features_v2.py -- these were part of the
 # 82-feature set tune_hyperparameters.py --full actually tuned against, so they need
 # to be here too or the tuned hyperparameters are being applied to a different
@@ -72,7 +72,15 @@ NEW_FEATURES = ["days_since_release", "trend_slope_14d", "trend_slope_30d", "ma_
 # Task A -- similarity_engine.py's pairs-trading signal: how far a player's recent
 # return has diverged from its K nearest statistical peers' average recent return.
 SIMILARITY_FEATURES = ["peer_divergence", "n_neighbors_with_data"]
-ALL_FEATURES = NUMERIC_FEATURES + NEW_FEATURES + SIMILARITY_FEATURES + CATEGORICAL_FEATURES
+# Task B -- promo_trajectory_clustering.py's early-shape signal. promo_cluster itself
+# is in CATEGORICAL_FEATURES (cluster ids aren't ordered); confidence is numeric.
+# Must match promo_trajectory_clustering.py's EARLY_DAYS -- before a promo card has
+# been out this many days, its cluster genuinely isn't predictable yet, so the
+# feature is left null for those rows rather than backfilled from a later date.
+PROMO_EARLY_DAYS = 5
+PROMO_FEATURES = ["promo_cluster_confidence"]
+ALL_FEATURES = (NUMERIC_FEATURES + NEW_FEATURES + SIMILARITY_FEATURES + PROMO_FEATURES
+                 + CATEGORICAL_FEATURES)
 
 
 def load_data():
@@ -119,6 +127,15 @@ def load_data():
     sim = pd.read_parquet(DATA_DIR / "peer_divergence.parquet",
                            columns=["player_id", "platform", "date"] + SIMILARITY_FEATURES)
     prices = prices.merge(sim, on=["player_id", "platform", "date"], how="left")
+
+    # promo_cluster is a single static value per (player_id, platform), not per date --
+    # merge it onto every row for that card, then null it out for rows before the card
+    # had been out PROMO_EARLY_DAYS days, since it genuinely wasn't knowable yet then.
+    promo = pd.read_parquet(DATA_DIR / "promo_early_prediction.parquet")
+    prices = prices.merge(promo, on=["player_id", "platform"], how="left")
+    not_yet_known = prices["days_since_release"] < PROMO_EARLY_DAYS
+    prices.loc[not_yet_known, "promo_cluster"] = None
+    prices.loc[not_yet_known, "promo_cluster_confidence"] = np.nan
 
     # downcast to float32 to keep memory manageable
     float_cols = prices.select_dtypes(include=["float64"]).columns
