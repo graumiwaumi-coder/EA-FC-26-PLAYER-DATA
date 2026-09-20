@@ -206,7 +206,16 @@ async def run_job(tab, job, out_f, scraped_at):
         url = f"{BASE_URL}?{qs}"
         await tab.get(url)
         rows = await extract_rows(tab)
+        if not rows and page == 1:
+            # First page came back empty -- could be a genuinely empty
+            # squad/bucket, or just a slow page load that outran
+            # MAX_WAIT_SECONDS. One retry before we accept it as empty.
+            await tab.get(url)
+            rows = await extract_rows(tab)
         if not rows:
+            if page == 1:
+                print(f"  NOTE: {label} returned 0 rows on page 1 (after a retry) -- "
+                      f"either genuinely empty right now, or worth checking manually.")
             break
         async with out_lock:
             for r in rows:
