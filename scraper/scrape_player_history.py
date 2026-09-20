@@ -79,6 +79,19 @@ async def block_resources(tab):
         pass
 
 
+GET_PAGE_TIMEOUT = 25
+
+
+async def get_page(tab, url):
+    """tab.get() with no outer timeout can hang forever if a page load never
+    fires its load event -- confirmed live on scrape_player_details.py's
+    identical pattern (a run got stuck on its last job with no error, no
+    progress, nothing short of a hard kill). Wrapping it lets a single bad
+    page raise into the caller's existing try/except instead of freezing
+    the whole run."""
+    await asyncio.wait_for(tab.get(url), timeout=GET_PAGE_TIMEOUT)
+
+
 def parse_body(body_text):
     m = {}
 
@@ -256,7 +269,7 @@ def load_player_universe():
 
 
 async def scrape_popular_list(tab):
-    await tab.get(POPULAR_URL)
+    await get_page(tab, POPULAR_URL)
     elapsed = 0.0
     hrefs = []
     while elapsed < MAX_WAIT_SECONDS:
@@ -290,10 +303,10 @@ async def worker(name, tab, queue, out_f, scraped_at):
             pid, slug = queue.popleft()
         url = f"{BASE}/27/player/{pid}/{slug}"
         try:
-            await tab.get(url)
+            await get_page(tab, url)
             rec = await extract_everything(tab)
             if rec is None:
-                await tab.get(url)
+                await get_page(tab, url)
                 rec = await extract_everything(tab)
             record = build_record(pid, url, rec, scraped_at)
             async with out_lock:
@@ -344,8 +357,12 @@ async def main():
     print(f"Launched {len(tabs)} tabs")
 
     players = load_player_universe()
-    popular = await scrape_popular_list(tabs[0])
-    players.update(popular)
+    try:
+        popular = await scrape_popular_list(tabs[0])
+        players.update(popular)
+    except Exception as e:
+        print(f"WARNING: /27/popular fetch failed ({str(e)[:80]}) -- "
+              f"continuing with just the market-list players")
     print(f"Total unique players to fetch: {len(players)}")
 
     if not players:

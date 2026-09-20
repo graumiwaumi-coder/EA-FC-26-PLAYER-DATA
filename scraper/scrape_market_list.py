@@ -147,6 +147,18 @@ async def block_resources(tab):
         pass
 
 
+GET_PAGE_TIMEOUT = 25
+
+
+async def get_page(tab, url):
+    """tab.get() with no outer timeout can hang forever if a page load never
+    fires its load event -- confirmed live: a run got stuck on its very last
+    job with no error, no progress, nothing to Ctrl+C into except a full
+    kill. Wrapping it lets a single bad page raise instead of freezing the
+    whole run (the caller's try/except already handles that)."""
+    await asyncio.wait_for(tab.get(url), timeout=GET_PAGE_TIMEOUT)
+
+
 def parse_player_id(url):
     if not url:
         return None
@@ -197,39 +209,48 @@ def build_jobs():
 
 
 async def run_job(tab, job, out_f, scraped_at):
-    """Paginate a single filtered query (squad or price-bucket) until empty/capped."""
+    """Paginate a single filtered query (squad or price-bucket) until empty/capped.
+    Any error (including a page that never finishes loading) is caught here
+    so one bad page skips just this job instead of taking the whole run
+    down via asyncio.gather -- gather cancels every other in-flight task the
+    moment one worker raises, so an uncaught exception here would silently
+    lose whatever every other tab was in the middle of, not just this job."""
     label = job["label"]
     total_rows = 0
-    for page in range(1, job["max_pages"] + 1):
-        params = dict(job["url_params"], page=page)
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
-        url = f"{BASE_URL}?{qs}"
-        await tab.get(url)
-        rows = await extract_rows(tab)
-        if not rows and page == 1:
-            # First page came back empty -- could be a genuinely empty
-            # squad/bucket, or just a slow page load that outran
-            # MAX_WAIT_SECONDS. One retry before we accept it as empty.
-            await tab.get(url)
+    try:
+        for page in range(1, job["max_pages"] + 1):
+            params = dict(job["url_params"], page=page)
+            qs = "&".join(f"{k}={v}" for k, v in params.items())
+            url = f"{BASE_URL}?{qs}"
+            await get_page(tab, url)
             rows = await extract_rows(tab)
-        if not rows:
-            if page == 1:
-                print(f"  NOTE: {label} returned 0 rows on page 1 (after a retry) -- "
-                      f"either genuinely empty right now, or worth checking manually.")
-            break
-        async with out_lock:
-            for r in rows:
-                r["player_id"] = parse_player_id(r.get("player_url"))
-                r["source"] = job["source"]
-                r["scraped_at"] = scraped_at
-                r.update(job["extra_fields"])
-                out_f.write(json.dumps(r) + "\n")
-            out_f.flush()
-        total_rows += len(rows)
-        if page == job["max_pages"]:
-            print(f"  WARNING: {label} hit MAX_PAGES cap ({job['max_pages']}) without an empty page -- "
-                  f"this bucket/squad likely has more results than we saw. Consider narrowing it.")
-        await asyncio.sleep(sum(PAGE_DELAY) / 2)
+            if not rows and page == 1:
+                # First page came back empty -- could be a genuinely empty
+                # squad/bucket, or just a slow page load that outran
+                # MAX_WAIT_SECONDS. One retry before we accept it as empty.
+                await get_page(tab, url)
+                rows = await extract_rows(tab)
+            if not rows:
+                if page == 1:
+                    print(f"  NOTE: {label} returned 0 rows on page 1 (after a retry) -- "
+                          f"either genuinely empty right now, or worth checking manually.")
+                break
+            async with out_lock:
+                for r in rows:
+                    r["player_id"] = parse_player_id(r.get("player_url"))
+                    r["source"] = job["source"]
+                    r["scraped_at"] = scraped_at
+                    r.update(job["extra_fields"])
+                    out_f.write(json.dumps(r) + "\n")
+                out_f.flush()
+            total_rows += len(rows)
+            if page == job["max_pages"]:
+                print(f"  WARNING: {label} hit MAX_PAGES cap ({job['max_pages']}) without an empty page -- "
+                      f"this bucket/squad likely has more results than we saw. Consider narrowing it.")
+            await asyncio.sleep(sum(PAGE_DELAY) / 2)
+    except Exception as e:
+        print(f"  ERROR on {label}: {str(e)[:80]} -- moving on to the next job "
+              f"({total_rows} rows already saved from this one)")
     return total_rows
 
 

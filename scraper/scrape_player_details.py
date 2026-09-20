@@ -136,6 +136,18 @@ async def block_resources(tab):
         pass
 
 
+GET_PAGE_TIMEOUT = 25
+
+
+async def get_page(tab, url):
+    """tab.get() with no outer timeout can hang forever if a page load never
+    fires its load event -- confirmed live: a run got stuck on its very last
+    job with no error, no progress, nothing to Ctrl+C into except a full
+    kill. Wrapping it lets a single bad page raise into the caller's
+    existing try/except instead of freezing the whole run."""
+    await asyncio.wait_for(tab.get(url), timeout=GET_PAGE_TIMEOUT)
+
+
 def parse_id_slug(url):
     if not url:
         return None, None
@@ -193,7 +205,7 @@ async def poll_for(tab, js, is_ready, default, max_wait=MAX_WAIT_SECONDS):
 
 
 async def scrape_popular_list(tab):
-    await tab.get(POPULAR_URL)
+    await get_page(tab, POPULAR_URL)
     hrefs = await poll_for(tab, POPULAR_EXTRACT_JS, lambda r: bool(r), [])
     players = {}
     for href in hrefs:
@@ -208,7 +220,7 @@ async def fetch_sales_page(tab, pid, slug, platform):
     """One player x one platform's sales-history page. Swap this out first
     if a JSON API is ever confirmed to exist -- see module docstring."""
     url = f"{BASE}/27/sales/{pid}/{slug}?platform={platform}"
-    await tab.get(url)
+    await get_page(tab, url)
     data = await poll_for(
         tab, SALES_EXTRACT_JS,
         lambda r: r and (r.get("daily") or r.get("live") or r.get("history")),
@@ -274,9 +286,13 @@ async def main():
     print(f"Launched {len(tabs)} tabs")
 
     market_players = load_market_players()
-    popular_players = await scrape_popular_list(tabs[0])
     all_players = dict(market_players)
-    all_players.update(popular_players)
+    try:
+        popular_players = await scrape_popular_list(tabs[0])
+        all_players.update(popular_players)
+    except Exception as e:
+        print(f"WARNING: /27/popular fetch failed ({str(e)[:80]}) -- "
+              f"continuing with just the market-list players")
     print(f"Total unique players: {len(all_players)}")
 
     jobs = deque()
