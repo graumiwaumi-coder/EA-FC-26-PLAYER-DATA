@@ -10,6 +10,7 @@ and multi-horizon forward returns (training targets).
 Run: python3 build_player_features.py && python3 build_index_features.py && python3 build_features.py
 (player + index features must be built first)
 """
+import gc
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,21 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
+
+
+def _downcast(df):
+    """float64 -> float32 in place. Every other feature-building script in this
+    pipeline already does this (train_model.py, tune_hyperparameters.py,
+    build_features_v2.py) -- this one never got it, and now that the price panel
+    carries FC27 alongside FC26 (plus an extra join-key column), it's the reason
+    a run that used to fit in 11GB RAM got OOM-killed. Called after every stage
+    below instead of once at the end, since it's peak memory during the run that
+    matters, not just the final size."""
+    float_cols = df.select_dtypes(include=["float64"]).columns
+    df[float_cols] = df[float_cols].astype("float32")
+    gc.collect()
+    return df
+
 
 MIN_TRADEABLE_PRICE = 1
 SELL_TAX = 0.05
@@ -123,8 +139,9 @@ def _tag_fc26(df):
 def add_index_context(prices, players):
     prices = prices.merge(players[["id", "rating", "band"]], left_on="player_id", right_on="id", how="left")
     prices = prices.drop(columns=["id"])
+    prices = _downcast(prices)
 
-    indices = _tag_fc26(pd.read_parquet(DATA_DIR / "indices_features.parquet"))
+    indices = _downcast(_tag_fc26(pd.read_parquet(DATA_DIR / "indices_features.parquet")))
     base_keys = ["band", "platform", "date"]
     join_keys = _fc26_only_join_keys(prices, base_keys)
     idx_cols = ["band", "platform", "date", "game_version", "index_value", "idx_pct_change_7d",
@@ -133,18 +150,24 @@ def add_index_context(prices, players):
         indices[idx_cols].rename(columns={c: f"band_{c}" for c in idx_cols if c not in join_keys}),
         on=join_keys, how="left",
     )
+    del indices
+    prices = _downcast(prices)
     prices["price_to_band_index_ratio"] = prices["price_clean"] / prices["band_index_value"]
     prices["band_ratio_zscore_60d"] = prices.groupby(["player_id", "platform"], sort=False)[
         "price_to_band_index_ratio"
     ].transform(lambda s: (s - s.rolling(60, min_periods=14).mean()) / s.rolling(60, min_periods=14).std())
+    prices = _downcast(prices)
 
-    macro = _tag_fc26(pd.read_parquet(DATA_DIR / "macro_wide.parquet"))
+    macro = _downcast(_tag_fc26(pd.read_parquet(DATA_DIR / "macro_wide.parquet")))
     join_keys_macro = _fc26_only_join_keys(prices, ["platform", "date"])
     prices = prices.merge(macro, on=join_keys_macro, how="left")
+    del macro
+    prices = _downcast(prices)
     prices["price_to_index100_ratio"] = prices["price_clean"] / prices["index100_index_value"]
     prices["index100_ratio_zscore_60d"] = prices.groupby(["player_id", "platform"], sort=False)[
         "price_to_index100_ratio"
     ].transform(lambda s: (s - s.rolling(60, min_periods=14).mean()) / s.rolling(60, min_periods=14).std())
+    prices = _downcast(prices)
 
     return prices
 
@@ -172,18 +195,23 @@ def add_calendar(prices):
 def main():
     players = pd.read_parquet(DATA_DIR / "players_features.parquet")
     prices = pd.read_parquet(DATA_DIR / "prices_long.parquet")
+    prices = _downcast(prices)
 
     print("Building technical/momentum features...")
     prices = build_price_features(prices, players)
+    prices = _downcast(prices)
 
     print("Adding cross-platform features...")
     prices = add_cross_platform(prices)
+    prices = _downcast(prices)
 
     print("Joining index/macro context...")
     prices = add_index_context(prices, players)
+    prices = _downcast(prices)
 
     print("Computing multi-horizon forward returns (training targets)...")
     prices = add_forward_returns(prices)
+    prices = _downcast(prices)
 
     print("Adding calendar features...")
     prices = add_calendar(prices)
