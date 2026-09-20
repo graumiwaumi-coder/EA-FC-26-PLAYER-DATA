@@ -3,15 +3,16 @@ FC27 live-trading dashboard: what the model currently likes, the buttons to refr
 market data and re-run the pipeline, and the model's own track record graded against
 real outcomes over time.
 
-Password-gated (DASHBOARD_PASSWORD env var) since this runs on a public port and one
-of its buttons can kick off real, resource-heavy work on the VPS. Note: this is a
-plain-HTTP password check, a speed bump against casual access, not real security --
-if that's ever a concern, put this behind HTTPS (e.g. a Caddy reverse proxy) later.
+No login -- runs open on whatever port it's started on. Low-value target (nothing
+sensitive is exposed, worst case a stranger who finds the port clicks a button that
+kicks off a scrape), traded off deliberately for not having to re-enter a password on
+every refresh. Ask for a password gate back anytime if that tradeoff ever stops making
+sense (e.g. a lighter option is a token in the URL query string instead of a login
+form, so it survives reloads).
 
 Run (from the repo root, with the venv active):
     streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501
 """
-import os
 import sys
 from pathlib import Path
 
@@ -25,29 +26,6 @@ import predictions_db as pdb  # noqa: E402
 import job_runner as jr  # noqa: E402
 
 st.set_page_config(page_title="FC27 Live Trading", layout="wide")
-
-
-def check_password():
-    app_password = os.environ.get("DASHBOARD_PASSWORD")
-    if not app_password:
-        st.error("DASHBOARD_PASSWORD environment variable is not set on the server -- "
-                  "refusing to start without a password configured. Set it and restart "
-                  "streamlit (see dashboard/README.md).")
-        st.stop()
-    if st.session_state.get("authenticated"):
-        return
-    st.title("FC27 Live Trading")
-    pw = st.text_input("Password", type="password")
-    if st.button("Log in") or pw:
-        if pw == app_password:
-            st.session_state["authenticated"] = True
-            st.rerun()
-        elif pw:
-            st.error("Incorrect password")
-    st.stop()
-
-
-check_password()
 
 st.title("FC27 Live Trading")
 

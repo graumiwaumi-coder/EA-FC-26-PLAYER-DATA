@@ -12,21 +12,6 @@ source venv/bin/activate
 pip install streamlit
 ```
 
-Pick a password and set it as an environment variable every time before starting
-the app (the app refuses to start without one):
-
-```bash
-export DASHBOARD_PASSWORD='choose-something-only-you-know'
-```
-
-To avoid re-typing that every session, add it to `~/.bashrc` instead (replace the
-placeholder first):
-
-```bash
-echo "export DASHBOARD_PASSWORD='choose-something-only-you-know'" >> ~/.bashrc
-source ~/.bashrc
-```
-
 Open the port in the VPS firewall if one is active (Contabo VPSes often ship with
 `ufw`):
 
@@ -42,8 +27,8 @@ source venv/bin/activate
 streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501
 ```
 
-Then open `http://173.249.46.127:8501` in a browser (phone or laptop) and log in
-with the password you set above.
+Then open `http://173.249.46.127:8501` in a browser (phone or laptop). No login --
+it runs open.
 
 **This only runs while that terminal session is open.** If you close your SSH
 session, the dashboard stops. To keep it running in the background:
@@ -74,9 +59,11 @@ in this project on this same VPS.
 
 ## Security note
 
-The password check is plain HTTP with no encryption — good enough to keep
-casual access out, but not real security (a password sent over an
-unencrypted connection can in principle be intercepted). If that ever
-matters, putting this behind a proper HTTPS reverse proxy (e.g. Caddy, which
-gets you automatic free certificates with a couple of config lines) is a
-reasonable next step, not something this v1 needed to solve.
+This dashboard has no login and runs open on a public port -- a deliberate
+tradeoff (made 2026-09-20) to avoid re-entering a password on every page
+refresh. Anyone who finds `173.249.46.127:8501` can view it and click its
+buttons, including the ones that trigger scraping. Nothing sensitive (money,
+credentials) is exposed through it, so the worst case is someone kicking off
+an unwanted scrape run. If that tradeoff ever stops making sense, ask for a
+password gate back, or for a lighter option like a token in the URL query
+string (survives reloads, harder to guess than nothing).
