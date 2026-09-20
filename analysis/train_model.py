@@ -69,7 +69,10 @@ CATEGORICAL_FEATURES = ["platform", "position", "position_group", "league", "nat
 NEW_FEATURES = ["days_since_release", "trend_slope_14d", "trend_slope_30d", "ma_crossover",
                 "days_since_crossover", "cross_sectional_rank", "beta_60d", "autocorr_30d",
                 "relative_strength"]
-ALL_FEATURES = NUMERIC_FEATURES + NEW_FEATURES + CATEGORICAL_FEATURES
+# Task A -- similarity_engine.py's pairs-trading signal: how far a player's recent
+# return has diverged from its K nearest statistical peers' average recent return.
+SIMILARITY_FEATURES = ["peer_divergence", "n_neighbors_with_data"]
+ALL_FEATURES = NUMERIC_FEATURES + NEW_FEATURES + SIMILARITY_FEATURES + CATEGORICAL_FEATURES
 
 
 def load_data():
@@ -112,6 +115,10 @@ def load_data():
     v2 = pd.read_parquet(DATA_DIR / "prices_features_v2.parquet",
                           columns=["player_id", "platform", "date"] + NEW_FEATURES)
     prices = prices.merge(v2, on=["player_id", "platform", "date"], how="left")
+
+    sim = pd.read_parquet(DATA_DIR / "peer_divergence.parquet",
+                           columns=["player_id", "platform", "date"] + SIMILARITY_FEATURES)
+    prices = prices.merge(sim, on=["player_id", "platform", "date"], how="left")
 
     # downcast to float32 to keep memory manageable
     float_cols = prices.select_dtypes(include=["float64"]).columns

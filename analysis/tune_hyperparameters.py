@@ -24,16 +24,14 @@ import pyarrow.dataset as ds
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from train_model import (NUMERIC_FEATURES, NEW_FEATURES, CATEGORICAL_FEATURES, MIN_RATING,
-                          HORIZON, TRAIN_WINDOW_DAYS, make_folds)
+from train_model import (NUMERIC_FEATURES, NEW_FEATURES, SIMILARITY_FEATURES, CATEGORICAL_FEATURES,
+                          MIN_RATING, HORIZON, TRAIN_WINDOW_DAYS, ALL_FEATURES, make_folds)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 PLAYER_LEVEL_NUMERIC = ["skills", "weak_foot", "height_cm", "age", "n_playstyles",
                         "league_price_score", "league_liquidity_score", "club_price_score",
                         "club_liquidity_score", "nation_price_score", "nation_liquidity_score"]
-
-ALL_FEATURES = NUMERIC_FEATURES + NEW_FEATURES + CATEGORICAL_FEATURES
 
 
 def load_combined_data():
@@ -53,6 +51,10 @@ def load_combined_data():
     v2 = pd.read_parquet(DATA_DIR / "prices_features_v2.parquet",
                           columns=["player_id", "platform", "date"] + NEW_FEATURES)
     df = df.merge(v2, on=["player_id", "platform", "date"], how="left")
+
+    sim = pd.read_parquet(DATA_DIR / "peer_divergence.parquet",
+                           columns=["player_id", "platform", "date"] + SIMILARITY_FEATURES)
+    df = df.merge(sim, on=["player_id", "platform", "date"], how="left")
 
     float_cols = df.select_dtypes(include=["float64"]).columns
     df[float_cols] = df[float_cols].astype("float32")
