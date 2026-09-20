@@ -24,11 +24,10 @@ import pyarrow.dataset as ds
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from train_model import NUMERIC_FEATURES, NEW_FEATURES, CATEGORICAL_FEATURES, MIN_RATING, HORIZON
+from train_model import (NUMERIC_FEATURES, NEW_FEATURES, CATEGORICAL_FEATURES, MIN_RATING,
+                          HORIZON, TRAIN_WINDOW_DAYS, make_folds)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-EMBARGO_DAYS = HORIZON
-TRAIN_WINDOW_DAYS = 200
 
 PLAYER_LEVEL_NUMERIC = ["skills", "weak_foot", "height_cm", "age", "n_playstyles",
                         "league_price_score", "league_liquidity_score", "club_price_score",
@@ -67,23 +66,6 @@ def load_combined_data():
     print(f"Combined training data: {len(df)} rows, {len(ALL_FEATURES)} features "
           f"({len(NEW_FEATURES)} new), {df['player_id'].nunique()} players")
     return df, target_reg, target_clf
-
-
-def make_folds(df, fold_edges):
-    min_date, max_date = df["date"].min(), df["date"].max()
-    total_days = (max_date - min_date).days
-    folds = []
-    for i in range(len(fold_edges) - 1):
-        test_start = min_date + pd.Timedelta(days=int(total_days * fold_edges[i]))
-        test_end = min_date + pd.Timedelta(days=int(total_days * fold_edges[i + 1]))
-        train_end = test_start - pd.Timedelta(days=EMBARGO_DAYS)
-        train_start = train_end - pd.Timedelta(days=TRAIN_WINDOW_DAYS)
-        train_mask = (df["date"] > train_start) & (df["date"] <= train_end)
-        test_mask = (df["date"] >= test_start) & (df["date"] < test_end)
-        if train_mask.sum() < 1000 or test_mask.sum() < 200:
-            continue
-        folds.append((train_mask, test_mask))
-    return folds
 
 
 class ProgressTracker:

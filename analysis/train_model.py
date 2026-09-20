@@ -10,10 +10,13 @@ Uses scikit-learn's HistGradientBoosting models (native categorical + missing-va
 support, no extra dependency beyond sklearn, memory-efficient histogram algorithm --
 the same family of algorithm as LightGBM/XGBoost).
 
-Validation is walk-forward / out-of-time: the model is trained ONLY on the earlier
-~75% of the season and tested ONLY on the later period it never saw, with a 21-day
-embargo gap on both sides of the split so no training label's forward-return window
-overlaps the test period. This is the same honest standard used in Phase 1's backtest.
+Validation is rolling-window walk-forward (4 folds, same layout as
+tune_hyperparameters.py --full): each fold trains only on the 200 days immediately
+before its test period, not an expanding window of everything seen so far, with a
+21-day embargo gap so no training label's forward-return window overlaps the test
+period. The deployed model that actually gets saved is then trained on the most
+recent 200-day window, which is what it would look like in production -- evaluated
+on all 4 folds to know how good the approach is, but not what gets shipped.
 
 Run: python3 train_model.py
 """
@@ -23,7 +26,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, mean_absolute_error
+from sklearn.metrics import roc_auc_score, accuracy_score, mean_absolute_error
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -33,6 +36,7 @@ MODEL_DIR.mkdir(exist_ok=True)
 HORIZON = 21
 MIN_RATING = 75
 EMBARGO_DAYS = HORIZON
+TRAIN_WINDOW_DAYS = 200  # rolling window, not expanding -- see make_folds()
 
 NUMERIC_FEATURES = [
     "rating", "ma_3", "ma_7", "ma_14", "ma_30", "ma_60", "ma_90",
@@ -120,6 +124,53 @@ def load_data():
     return prices
 
 
+def make_folds(df, fold_edges):
+    """Rolling-window walk-forward folds -- NOT an expanding window. Each fold trains
+    only on the TRAIN_WINDOW_DAYS immediately before its test period (with an embargo
+    gap so no training label's forward-return window overlaps the test period), the
+    same approach already used by tune_hyperparameters.py and the Colab notebook.
+    An expanding window (train on everything from the start) was the original design
+    here but was never brought in line with that fix -- it trains on stale,
+    increasingly-irrelevant early-season data and a single split can land entirely in
+    an unusually hard period, which is what was producing misleadingly low holdout
+    scores."""
+    min_date, max_date = df["date"].min(), df["date"].max()
+    total_days = (max_date - min_date).days
+    folds = []
+    for i in range(len(fold_edges) - 1):
+        test_start = min_date + pd.Timedelta(days=int(total_days * fold_edges[i]))
+        test_end = min_date + pd.Timedelta(days=int(total_days * fold_edges[i + 1]))
+        train_end = test_start - pd.Timedelta(days=EMBARGO_DAYS)
+        train_start = train_end - pd.Timedelta(days=TRAIN_WINDOW_DAYS)
+        train_mask = (df["date"] > train_start) & (df["date"] <= train_end)
+        test_mask = (df["date"] >= test_start) & (df["date"] < test_end)
+        if train_mask.sum() < 1000 or test_mask.sum() < 200:
+            continue
+        folds.append((train_mask, test_mask))
+    return folds
+
+
+def make_clf(cat_idx):
+    # Hyperparameters below come from tune_hyperparameters.py --full: a 40-combo x
+    # 4-fold walk-forward search, best result AUC=0.768 (vs ~0.75-0.76 with the
+    # previous guessed defaults). Only the classifier was tuned directly (the
+    # search optimized target_clf); the same combo is applied to the regressor
+    # too since a dedicated regression tuning pass hasn't been run yet.
+    return HistGradientBoostingClassifier(
+        categorical_features=cat_idx, max_iter=300, learning_rate=0.02,
+        max_leaf_nodes=15, min_samples_leaf=50, l2_regularization=1.0, max_bins=255,
+        early_stopping=True, validation_fraction=0.15, random_state=42,
+    )
+
+
+def make_reg(cat_idx):
+    return HistGradientBoostingRegressor(
+        categorical_features=cat_idx, max_iter=300, learning_rate=0.02,
+        max_leaf_nodes=15, min_samples_leaf=50, l2_regularization=1.0, max_bins=255,
+        early_stopping=True, validation_fraction=0.15, random_state=42,
+    )
+
+
 def main():
     print("Loading and merging data (Gold+ only, memory-safe column selection)...")
     df = load_data()
@@ -130,41 +181,65 @@ def main():
     df = df.dropna(subset=[target_reg, target_clf])
     print(f"Rows with valid {HORIZON}-day forward target: {len(df)}")
 
-    dates = df["date"]
-    split_date = dates.quantile(0.75)
-    train_mask = dates <= (split_date - pd.Timedelta(days=EMBARGO_DAYS))
-    test_mask = dates >= (split_date + pd.Timedelta(days=EMBARGO_DAYS))
-    print(f"Split date: {split_date.date()}  (embargo {EMBARGO_DAYS} days each side)")
-    print(f"Train rows: {train_mask.sum()}  (dates up to {dates[train_mask].max().date()})")
-    print(f"Test rows: {test_mask.sum()}  (dates from {dates[test_mask].min().date()})")
-
-    X_train = df.loc[train_mask, ALL_FEATURES]
-    X_test = df.loc[test_mask, ALL_FEATURES]
-    y_train_reg = df.loc[train_mask, target_reg]
-    y_test_reg = df.loc[test_mask, target_reg]
-    y_train_clf = df.loc[train_mask, target_clf].astype(int)
-    y_test_clf = df.loc[test_mask, target_clf].astype(int)
-
     cat_idx = [ALL_FEATURES.index(c) for c in CATEGORICAL_FEATURES]
 
-    print("\nTraining classifier (profitable after tax: yes/no)...")
-    # Hyperparameters below come from tune_hyperparameters.py --full: a 40-combo x
-    # 4-fold walk-forward search, best result AUC=0.768 (vs ~0.75-0.76 with the
-    # previous guessed defaults). Only the classifier was tuned directly (the
-    # search optimized target_clf); the same combo is applied to the regressor
-    # below too since a dedicated regression tuning pass hasn't been run yet.
-    clf = HistGradientBoostingClassifier(
-        categorical_features=cat_idx, max_iter=300, learning_rate=0.02,
-        max_leaf_nodes=15, min_samples_leaf=50, l2_regularization=1.0, max_bins=255,
-        early_stopping=True, validation_fraction=0.15, random_state=42,
-    )
-    clf.fit(X_train, y_train_clf)
+    # Same fold layout as tune_hyperparameters.py --full, so this evaluation is
+    # directly comparable to the AUC=0.768 the hyperparameters were chosen against.
+    fold_edges = [0.55, 0.65, 0.75, 0.85, 0.95]
+    folds = make_folds(df, fold_edges)
+    print(f"\n=== Rolling-window walk-forward evaluation: {len(folds)} folds ===")
 
+    aucs, win_rates_50 = [], []
+    for i, (train_mask, test_mask) in enumerate(folds):
+        X_train = df.loc[train_mask, ALL_FEATURES]
+        X_test = df.loc[test_mask, ALL_FEATURES]
+        y_train_clf = df.loc[train_mask, target_clf].astype(int)
+        y_test_clf = df.loc[test_mask, target_clf].astype(int)
+
+        clf_fold = make_clf(cat_idx)
+        clf_fold.fit(X_train, y_train_clf)
+        proba = clf_fold.predict_proba(X_test)[:, 1]
+        fold_auc = roc_auc_score(y_test_clf, proba)
+        mask_conf = proba >= 0.5
+        fold_win_rate = y_test_clf.to_numpy()[mask_conf].mean() if mask_conf.sum() > 0 else np.nan
+        aucs.append(fold_auc)
+        win_rates_50.append(fold_win_rate)
+        print(f"  Fold {i+1}/{len(folds)}: test dates {df.loc[test_mask,'date'].min().date()} -> "
+              f"{df.loc[test_mask,'date'].max().date()}, AUC={fold_auc:.3f}, win_rate@0.5={fold_win_rate:.1%}")
+
+    print(f"\nAveraged across folds: AUC={np.mean(aucs):.3f} (std={np.std(aucs):.3f}), "
+          f"win_rate@0.5={np.nanmean(win_rates_50):.1%}")
+
+    # The evaluation above tells us how good the SYSTEM is; the deployed model itself
+    # should be trained on the most recent window so it reflects the current game
+    # economy, not stale data from a year ago -- same train window as the last fold.
+    last_train_mask, _ = folds[-1]
+    print(f"\n=== Training final deployed model on the most recent {TRAIN_WINDOW_DAYS}-day window "
+          f"({last_train_mask.sum()} rows) ===")
+    X_train = df.loc[last_train_mask, ALL_FEATURES]
+    y_train_clf = df.loc[last_train_mask, target_clf].astype(int)
+    y_train_reg = df.loc[last_train_mask, target_reg]
+
+    clf = make_clf(cat_idx)
+    clf.fit(X_train, y_train_clf)
+    reg = make_reg(cat_idx)
+    reg.fit(X_train, y_train_reg)
+
+    # held-out sanity check for the deployed model: the last fold's test period,
+    # which it never trained on
+    _, last_test_mask = folds[-1]
+    X_test = df.loc[last_test_mask, ALL_FEATURES]
+    y_test_clf = df.loc[last_test_mask, target_clf].astype(int)
+    y_test_reg = df.loc[last_test_mask, target_reg]
     proba_test = clf.predict_proba(X_test)[:, 1]
+    pred_reg = reg.predict(X_test)
     pred_test = (proba_test >= 0.5).astype(int)
-    print(f"Holdout AUC: {roc_auc_score(y_test_clf, proba_test):.3f}")
-    print(f"Holdout accuracy @0.5 threshold: {accuracy_score(y_test_clf, pred_test):.3f}")
-    print(f"Baseline (predict majority class) accuracy: {max(y_test_clf.mean(), 1 - y_test_clf.mean()):.3f}")
+    print(f"Deployed model holdout AUC (most recent fold's test period): "
+          f"{roc_auc_score(y_test_clf, proba_test):.3f}")
+    print(f"Deployed model holdout accuracy @0.5 threshold: {accuracy_score(y_test_clf, pred_test):.3f} "
+          f"(baseline/majority-class accuracy: {max(y_test_clf.mean(), 1 - y_test_clf.mean()):.3f})")
+    print(f"Deployed model regressor MAE: {mean_absolute_error(y_test_reg, pred_reg):.3f}, "
+          f"correlation(predicted, actual): {np.corrcoef(pred_reg, y_test_reg)[0,1]:.3f}")
 
     for thresh in (0.5, 0.6, 0.7, 0.8):
         mask = proba_test >= thresh
@@ -176,17 +251,6 @@ def main():
         med_return = np.median(y_test_reg.to_numpy()[mask])
         print(f"  Predicted prob>={thresh}: n={n} ({n/len(proba_test):.1%} of test), "
               f"actual win rate={actual_win_rate:.1%}, mean net return={avg_return:.1%}, median net return={med_return:.1%}")
-
-    print("\nTraining regressor (expected % return)...")
-    reg = HistGradientBoostingRegressor(
-        categorical_features=cat_idx, max_iter=300, learning_rate=0.02,
-        max_leaf_nodes=15, min_samples_leaf=50, l2_regularization=1.0, max_bins=255,
-        early_stopping=True, validation_fraction=0.15, random_state=42,
-    )
-    reg.fit(X_train, y_train_reg)
-    pred_reg = reg.predict(X_test)
-    print(f"Holdout MAE: {mean_absolute_error(y_test_reg, pred_reg):.3f}")
-    print(f"Correlation(predicted, actual): {np.corrcoef(pred_reg, y_test_reg)[0,1]:.3f}")
 
     # top-decile check: if we only acted on the highest-predicted-return players, how did they do?
     order = np.argsort(-pred_reg)
