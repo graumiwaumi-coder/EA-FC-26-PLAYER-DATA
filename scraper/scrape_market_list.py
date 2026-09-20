@@ -157,6 +157,26 @@ async def get_page(tab, url):
     kill. Wrapping it lets a single bad page raise instead of freezing the
     whole run (the caller's try/except already handles that)."""
     await asyncio.wait_for(tab.get(url), timeout=GET_PAGE_TIMEOUT)
+    await dismiss_cookie_banner(tab)
+
+
+async def dismiss_cookie_banner(tab):
+    """Click through the cookie-consent banner if it's showing. Confirmed
+    live via VNC: the market-list page's real content doesn't finish
+    rendering underneath this banner, which is why every row extraction
+    was silently coming back empty -- not a CAPTCHA or a bot-block."""
+    try:
+        await tab.evaluate("""
+        (() => {
+            const btn = document.querySelector('#onetrust-reject-all-handler') ||
+                        Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Reject All') ||
+                        Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'I Accept');
+            if (btn) { btn.click(); return true; }
+            return false;
+        })()
+        """)
+    except Exception:
+        pass
 
 
 def parse_player_id(url):

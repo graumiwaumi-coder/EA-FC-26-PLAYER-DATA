@@ -90,6 +90,26 @@ async def get_page(tab, url):
     page raise into the caller's existing try/except instead of freezing
     the whole run."""
     await asyncio.wait_for(tab.get(url), timeout=GET_PAGE_TIMEOUT)
+    await dismiss_cookie_banner(tab)
+
+
+async def dismiss_cookie_banner(tab):
+    """Click through the cookie-consent banner if it's showing. Confirmed
+    live via VNC on scrape_market_list.py's identical pattern: a page's
+    real content doesn't finish rendering underneath this banner, which
+    silently looked like an empty/blocked page rather than what it was."""
+    try:
+        await tab.evaluate("""
+        (() => {
+            const btn = document.querySelector('#onetrust-reject-all-handler') ||
+                        Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Reject All') ||
+                        Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'I Accept');
+            if (btn) { btn.click(); return true; }
+            return false;
+        })()
+        """)
+    except Exception:
+        pass
 
 
 def parse_body(body_text):
