@@ -180,7 +180,17 @@ def simulate_equity_curve(returns_pool, starting_bankroll, rng, n_positions=N_PO
         else:
             sampled_fractions = np.full_like(sampled_returns, fixed_fraction / n_positions)
 
-        # each position stakes its own kelly_fraction of CURRENT bankroll independently
+        # Each position's OWN Kelly fraction can be up to MAX_POSITION_FRACTION, but
+        # nothing stops all n_positions from hitting that cap simultaneously -- with no
+        # leverage/borrowing available, total stake across every simultaneous position
+        # still can't exceed the bankroll actually in hand. Scale each row down
+        # proportionally whenever the fractions would sum past 100%; leave rows alone
+        # where the total is already under 100% (no need to force full deployment).
+        row_totals = sampled_fractions.sum(axis=1, keepdims=True)
+        scale = np.where(row_totals > 1.0, 1.0 / row_totals, 1.0)
+        sampled_fractions = sampled_fractions * scale
+
+        # each position stakes its own (now capacity-scaled) kelly_fraction of CURRENT bankroll
         per_position_stake = bankroll[:, None] * sampled_fractions
         pnl = (per_position_stake * sampled_returns).sum(axis=1)
         bankroll = bankroll + pnl
