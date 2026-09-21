@@ -201,36 +201,36 @@ async def get_page(tab, url):
     await dismiss_cookie_banner(tab)
 
 
-def parse_money(s):
-    if s is None:
-        return None
-    s = str(s).strip().upper().replace(",", "")
-    mult = 1
-    if s.endswith("K"):
-        mult, s = 1_000, s[:-1]
-    elif s.endswith("M"):
-        mult, s = 1_000_000, s[:-1]
-    try:
-        return float(s) * mult
-    except ValueError:
-        return None
-
-
 def parse_card(card):
     """card = {"href": "/27/player/123/slug", "text": "<raw card blob>"}.
-    Pulls out whatever we reasonably can from the blob without assuming an
-    exact layout -- unconfirmed live, so kept defensive."""
+    Pulls out whatever we can reliably get from the blob. Confirmed live:
+    price is NOT reliably extractable here -- two adjacent figures (e.g. a
+    quick-sell value and the actual listed price, "15M" and "24.75K") come
+    through in the raw text with no separating space, so any regex/token
+    guess either grabs a meaningless fragment of one of them or some other
+    stray digit on the card (weak foot, skill moves). A wrong price is
+    worse than no price, so this doesn't attempt one -- the real price
+    gets captured reliably anyway once this player goes through the main
+    scrape_player_history.py/scrape_player_details.py pipeline, which uses
+    dedicated selectors rather than blob-guessing. Rating and % change are
+    both reliably anchored (a plausible 75-99 token; a '%'-suffixed
+    number) and are kept."""
     m = re.search(r"/27/player/(\d+)/([^/?]+)", card.get("href") or "")
     player_id, slug = (int(m.group(1)), m.group(2)) if m else (None, None)
     text = card.get("text") or ""
-    rating_m = re.search(r"\b(\d{2})\b", text)
-    price_m = re.search(r"\b(\d[\d,.]*[KM]?)\b(?!%)", text)
+
+    rating = None
+    for tok in text.split():
+        if re.fullmatch(r"\d{2}", tok) and 40 <= int(tok) <= 99:
+            rating = int(tok)
+            break
+
     pct_m = re.search(r"([+-]?\d[\d.]*)%", text)
     return {
         "player_id": player_id,
         "slug": slug,
-        "rating": int(rating_m.group(1)) if rating_m else None,
-        "price": parse_money(price_m.group(1)) if price_m else None,
+        "rating": rating,
+        "price": None,
         "pct_change": float(pct_m.group(1)) if pct_m else None,
         "raw_text": text,
     }
