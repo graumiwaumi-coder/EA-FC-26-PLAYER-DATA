@@ -1,14 +1,16 @@
 """
-FC27 live-trading dashboard: what the model currently likes, the buttons to refresh
-market data and re-run the pipeline, and the model's own track record graded against
-real outcomes over time.
+FC27 live-trading dashboard: the model's current BUY list (with exact
+position sizes against a manually-entered bankroll), a separate SELL list
+for currently-held cards, holdings entry/tracking, and the model's own
+live track record graded against real outcomes over time.
 
-No login -- runs open on whatever port it's started on. Low-value target (nothing
-sensitive is exposed, worst case a stranger who finds the port clicks a button that
-kicks off a scrape), traded off deliberately for not having to re-enter a password on
-every refresh. Ask for a password gate back anytime if that tradeoff ever stops making
-sense (e.g. a lighter option is a token in the URL query string instead of a login
-form, so it survives reloads).
+No login -- runs open on whatever port it's started on. Low-value target
+(nothing sensitive is exposed, worst case a stranger who finds the port
+clicks a button that kicks off a scrape), traded off deliberately for not
+having to re-enter a password on every refresh. Ask for a password gate
+back anytime if that tradeoff ever stops making sense (e.g. a lighter
+option is a token in the URL query string instead of a login form, so it
+survives reloads).
 
 Run (from the repo root, with the venv active):
     streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501
@@ -22,26 +24,27 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "analysis"))
 
-import predictions_db as pdb  # noqa: E402
+import recommendations_db as rdb  # noqa: E402
 import job_runner as jr  # noqa: E402
 
 st.set_page_config(page_title="FC27 Live Trading", layout="wide")
 
 st.title("FC27 Live Trading")
 
+# "Refresh market data" runs the whole pipeline through to a fresh BUY/SELL
+# list -- scoring happens automatically after every scrape, per spec, not
+# as a separate manual step. "Rebuild features & rescore" re-derives
+# features/predictions from whatever's already scraped, without spending
+# time on a fresh scrape (e.g. after a bankroll change or a code fix).
 REFRESH_CMD = ["bash", "-c",
     "cd scraper && xvfb-run -a python3 scrape_player_history.py && "
-    "cd ../analysis && python3 -u build_live_dataset.py"]
+    "cd ../analysis && python3 -u build_live_dataset.py && "
+    "python3 -u build_features.py && "
+    "python3 -u score_predictions.py"]
 REBUILD_CMD = ["bash", "-c",
     "cd analysis && "
-    "python3 -u build_player_features.py && "
-    "python3 -u build_index_features.py && "
     "python3 -u build_features.py && "
-    "python3 -u build_features_v2.py && "
-    "python3 -u similarity_engine.py && "
-    "python3 -u volatility_regime_analysis.py && "
-    "python3 -u live_score.py && "
-    "python3 -u evaluate_predictions.py"]
+    "python3 -u score_predictions.py"]
 
 # ------------------------------------------------------------------ action buttons
 job = jr.current_job()
@@ -50,8 +53,8 @@ col1, col2, col3 = st.columns([1, 1, 2])
 with col1:
     refresh_disabled = job is not None
     if st.button("Refresh market data", disabled=refresh_disabled, help="Scrapes the live FC27 "
-                 "market (Chrome automation, takes a while) and merges it into players.parquet "
-                 "/ prices_long.parquet. Doesn't rebuild features or rescore by itself."):
+                 "market, merges it in, rebuilds features, and re-scores -- the full pipeline, "
+                 "end to end. Takes a while."):
         try:
             jr.start_job("refresh_market_data", REFRESH_CMD)
             st.rerun()
@@ -59,10 +62,9 @@ with col1:
             st.error(str(e))
 with col2:
     rebuild_disabled = job is not None
-    if st.button("Rebuild features & rescore", disabled=rebuild_disabled, help="Rebuilds the "
-                 "whole feature pipeline against the latest scraped data and re-scores the "
-                 "live FC27 market. Run 'Refresh market data' first if you want fresher prices "
-                 "included. Also grades any past predictions whose 21-day horizon has elapsed."):
+    if st.button("Rebuild features & rescore", disabled=rebuild_disabled, help="Rebuilds features "
+                 "and re-scores against whatever's already scraped, without a fresh scrape. Use "
+                 "this after changing the bankroll or adding/closing holdings."):
         try:
             jr.start_job("rebuild_features_rescore", REBUILD_CMD)
             st.rerun()
@@ -73,7 +75,8 @@ with col3:
         st.info(f"Running: **{job['job_name']}** (started "
                 f"{pd.Timestamp.fromtimestamp(job['started_at']):%Y-%m-%d %H:%M:%S})")
     else:
-        st.caption("No job currently running.")
+        st.caption("No job currently running. Model retraining runs separately, "
+                   "on its own Wed/Sun schedule (see PROJECT.md) -- not a button here.")
 
 if job is not None:
     with st.expander("Live log", expanded=True):
@@ -90,86 +93,192 @@ elif (ROOT / "data" / "jobs" / "rebuild_features_rescore.log").exists() or \
 
 st.divider()
 
-# ------------------------------------------------------------------ live opportunities
-st.header("Current opportunities")
+# ------------------------------------------------------------------ bankroll
+st.header("Bankroll")
+st.caption("Entered manually and reused by every scoring run until changed here -- position "
+           "sizes below are fully optimized against whatever this is currently set to.")
+current_bankroll = rdb.get_bankroll()
+c1, c2 = st.columns([1, 3])
+with c1:
+    new_bankroll = st.number_input("Available coins", min_value=0.0, value=float(current_bankroll),
+                                    step=1000.0, format="%.0f")
+    if st.button("Save bankroll"):
+        rdb.set_bankroll(new_bankroll)
+        st.success(f"Saved -- {new_bankroll:,.0f} coins. Click 'Rebuild features & rescore' to "
+                   f"re-size the BUY list against it.")
 
-latest = pdb.load_latest_batch()
-if latest.empty:
-    st.warning("No predictions recorded yet. Run 'Rebuild features & rescore' at least once.")
+st.divider()
+
+# ------------------------------------------------------------------ buy list
+st.header("Buy list")
+st.caption("Every PC/FC27 Gold+ card clearing the 60% confidence bar, ranked by opportunity-cost-"
+           "adjusted daily return (predicted return divided by horizon + estimated days-to-sell) -- "
+           "not just the highest headline number. Position sizes use fractional (0.75x) Kelly "
+           "against the bankroll above.")
+
+buy = rdb.load_latest_buy_list()
+if buy.empty:
+    st.warning("No BUY recommendations yet. Run 'Refresh market data' or 'Rebuild features & "
+               "rescore' at least once.")
 else:
-    as_of = latest["snapshot_date"].max()
-    st.caption(f"As of {as_of:%Y-%m-%d} -- {len(latest)} (player, platform) predictions")
+    as_of = buy["snapshot_date"].max()
+    st.caption(f"As of {as_of:%Y-%m-%d} -- {len(buy)} candidate(s)")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        min_prob = st.slider("Minimum predicted win probability", 0.0, 1.0, 0.5, 0.05)
+        horizons_avail = sorted(buy["horizon_days"].unique().tolist())
+        horizons_sel = st.multiselect("Horizon (days)", options=horizons_avail, default=horizons_avail)
     with c2:
-        platforms = st.multiselect("Platform", options=sorted(latest["platform"].unique()),
-                                    default=sorted(latest["platform"].unique()))
+        thin_ok = st.checkbox("Include thin-history (less certain) cards", value=True)
     with c3:
-        positions = st.multiselect("Position", options=sorted(latest["position"].dropna().unique()),
-                                    default=sorted(latest["position"].dropna().unique()))
+        affordable_only = st.checkbox("Only cards I can afford right now", value=False)
 
-    view = latest[
-        (latest["predicted_win_prob"] >= min_prob) &
-        (latest["platform"].isin(platforms)) &
-        (latest["position"].isin(positions))
-    ].sort_values("predicted_win_prob", ascending=False)
+    view = buy[buy["horizon_days"].isin(horizons_sel)]
+    if not thin_ok:
+        view = view[view["confidence_flag"] != "thin_history"]
+    if affordable_only:
+        view = view[view["recommended_quantity"] > 0]
+    view = view.sort_values("effective_daily_return", ascending=False)
 
     st.dataframe(
-        view[["url", "platform", "rating", "position", "club", "league",
-              "price_at_snapshot", "predicted_win_prob", "predicted_return_21d"]],
+        view[["url", "rating", "position", "club", "league", "squad", "horizon_days",
+              "price_at_snapshot", "predicted_win_prob", "predicted_return_pct",
+              "est_days_to_sell", "effective_daily_return", "recommended_quantity",
+              "recommended_coins", "confidence_flag", "rationale"]],
         use_container_width=True, hide_index=True,
         column_config={
             "predicted_win_prob": st.column_config.ProgressColumn(
                 "Win probability", min_value=0.0, max_value=1.0, format="%.0f%%"),
-            "predicted_return_21d": st.column_config.NumberColumn(
-                "Predicted 21d return", format="%.1f%%"),
+            "predicted_return_pct": st.column_config.NumberColumn(
+                "Predicted return (if it wins)", format="%.1f%%"),
+            "effective_daily_return": st.column_config.NumberColumn(
+                "Opportunity-cost-adjusted daily return", format="%.2f%%"),
             "price_at_snapshot": st.column_config.NumberColumn("Price", format="%d"),
+            "recommended_coins": st.column_config.NumberColumn("Coins to invest", format="%d"),
+            "est_days_to_sell": st.column_config.NumberColumn("Est. days to sell", format="%.1f"),
+            "horizon_days": st.column_config.NumberColumn("Horizon (days)"),
         },
     )
-    st.download_button("Download as CSV", view.to_csv(index=False), file_name="fc27_opportunities.csv")
+    st.caption(f"Total coins across this filtered list: {view['recommended_coins'].sum():,.0f} "
+               f"of {current_bankroll:,.0f} bankroll")
+    st.download_button("Download as CSV", view.to_csv(index=False), file_name="fc27_buy_list.csv")
+
+st.divider()
+
+# ------------------------------------------------------------------ holdings + sell list
+st.header("Holdings & sell list")
+
+with st.expander("Add a holding (after you manually buy a card)"):
+    with st.form("add_holding"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            h_player_id = st.number_input("Player ID (from the futbin URL)", min_value=0, step=1)
+            h_quantity = st.number_input("Quantity bought", min_value=1, step=1, value=1)
+        with c2:
+            h_price = st.number_input("Price paid per copy", min_value=0.0, step=100.0)
+            h_date = st.date_input("Buy date", value=pd.Timestamp.now().date())
+        with c3:
+            h_platform = st.selectbox("Platform", options=["pc"], index=0)
+            h_notes = st.text_input("Notes (optional)")
+        submitted = st.form_submit_button("Add holding")
+        if submitted:
+            rdb.add_holding(int(h_player_id), h_platform, "fc27", int(h_quantity), float(h_price),
+                             str(h_date), h_notes or None)
+            st.success("Holding added. Run 'Rebuild features & rescore' to get its current outlook.")
+            st.rerun()
+
+holdings = rdb.list_holdings(open_only=True)
+if holdings.empty:
+    st.caption("No open holdings.")
+else:
+    holdings = holdings.copy()
+    holdings["cost_basis"] = holdings["quantity"] * holdings["buy_price_per_unit"]
+    holdings["sell_signal"] = holdings["last_sell_signal"].map({1: "SELL", 0: "hold"}).fillna("not yet scored")
+    st.dataframe(
+        holdings[["id", "player_id", "quantity", "buy_price_per_unit", "buy_date", "last_price",
+                  "last_win_prob", "last_horizon_days", "last_unrealized_return_pct", "sell_signal", "notes"]],
+        use_container_width=True, hide_index=True,
+        column_config={
+            "last_win_prob": st.column_config.ProgressColumn(
+                "Best remaining win probability", min_value=0.0, max_value=1.0, format="%.0f%%"),
+            "last_unrealized_return_pct": st.column_config.NumberColumn(
+                "Unrealized P&L (net of tax)", format="%.1f%%"),
+            "buy_price_per_unit": st.column_config.NumberColumn("Bought at", format="%d"),
+            "last_price": st.column_config.NumberColumn("Current price", format="%d"),
+        },
+    )
+
+    with st.expander("Mark a holding as sold"):
+        with st.form("close_holding"):
+            close_id = st.number_input("Holding ID", min_value=0, step=1)
+            close_price = st.number_input("Actual sell price per copy (optional)", min_value=0.0, step=100.0)
+            close_submitted = st.form_submit_button("Mark sold / remove from holdings")
+            if close_submitted:
+                rdb.close_holding(int(close_id), close_price if close_price > 0 else None)
+                st.success(f"Holding {int(close_id)} closed.")
+                st.rerun()
+
+sell_list = rdb.load_latest_sell_list()
+st.subheader("Sell signals")
+if sell_list.empty:
+    st.caption("No holdings currently flagged SELL (best remaining win probability below 50%).")
+else:
+    as_of = sell_list["snapshot_date"].max()
+    st.caption(f"As of {as_of:%Y-%m-%d} -- re-scored with the same 12 models used for the buy list.")
+    st.dataframe(
+        sell_list[["url", "holding_id", "price_at_snapshot", "predicted_win_prob", "horizon_days",
+                   "unrealized_return_pct"]],
+        use_container_width=True, hide_index=True,
+        column_config={
+            "predicted_win_prob": st.column_config.ProgressColumn(
+                "Best remaining win probability", min_value=0.0, max_value=1.0, format="%.0f%%"),
+            "unrealized_return_pct": st.column_config.NumberColumn(
+                "Unrealized P&L (net of tax)", format="%.1f%%"),
+            "price_at_snapshot": st.column_config.NumberColumn("Current price", format="%d"),
+            "horizon_days": st.column_config.NumberColumn("Best remaining horizon (days)"),
+        },
+    )
 
 st.divider()
 
 # ------------------------------------------------------------------ track record
 st.header("Track record")
 
-counts = pdb.counts()
+counts = rdb.counts()
 c1, c2, c3 = st.columns(3)
-c1.metric("Total predictions made", counts["total"])
+c1.metric("Total BUY recommendations made", counts["total"])
 c2.metric("Graded so far", counts["graded"])
 c3.metric("Pending (horizon not reached yet)", counts["pending"])
 
-graded = pdb.load_graded()
+graded = rdb.load_graded()
 if graded.empty:
-    st.caption("Nothing graded yet -- predictions are only gradeable 21 days after they're made. "
-               "Check back once the earliest live predictions have had time to play out.")
+    st.caption("Nothing graded yet -- a recommendation is only gradeable once its own horizon has "
+               "elapsed and a real price point exists near that date. Check back as live "
+               "predictions have time to play out.")
 else:
-    overall_win_rate = graded["actual_up"].mean()
+    overall_win_rate = graded["actual_win"].mean()
     overall_mean_return = graded["actual_return"].mean()
     c1, c2 = st.columns(2)
     c1.metric("Actual win rate (all graded)", f"{overall_win_rate:.1%}")
     c2.metric("Actual mean return (all graded)", f"{overall_mean_return:.1%}")
 
     st.subheader("Calibration: does predicted confidence match actual outcomes?")
-    bins = [0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.01]
-    labels = ["<30%", "30-40%", "40-50%", "50-60%", "60-70%", "70-80%", "80%+"]
+    bins = [0, 0.6, 0.7, 0.8, 0.9, 1.01]
+    labels = ["60-70%", "70-80%", "80-90%", "90-100%", "100%"]
     graded = graded.copy()
     graded["predicted_bucket"] = pd.cut(graded["predicted_win_prob"], bins=bins, labels=labels, right=False)
     calib = graded.groupby("predicted_bucket", observed=True).agg(
-        n=("actual_up", "size"), actual_win_rate=("actual_up", "mean"),
+        n=("actual_win", "size"), actual_win_rate=("actual_win", "mean"),
         actual_mean_return=("actual_return", "mean"),
     ).reset_index()
     st.dataframe(calib, use_container_width=True, hide_index=True,
                  column_config={"actual_win_rate": st.column_config.NumberColumn(format="%.1%"),
                                  "actual_mean_return": st.column_config.NumberColumn(format="%.1%")})
     st.caption("A well-calibrated model's 'actual_win_rate' column should roughly track its "
-               "predicted bucket (the 60-70% row winning close to 60-70% of the time, etc). "
-               "This is graded on live FC27 outcomes, not a historical backtest -- treat early "
-               "readings (few graded predictions) with real caution, not full confidence.")
+               "predicted bucket. This is graded on live FC27 outcomes, not a historical backtest -- "
+               "treat early readings (few graded rows) with real caution, not full confidence.")
 
-    with st.expander("All graded predictions"):
-        st.dataframe(graded[["url", "platform", "snapshot_date", "predicted_win_prob",
-                              "predicted_return_21d", "actual_return", "actual_up"]],
+    with st.expander("All graded BUY recommendations"):
+        st.dataframe(graded[["url", "snapshot_date", "horizon_days", "predicted_win_prob",
+                              "predicted_return_pct", "actual_return", "actual_win"]],
                      use_container_width=True, hide_index=True)

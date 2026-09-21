@@ -115,19 +115,34 @@ def prepare_features(df, feature_cols):
     like, regardless of whether it happened to survive as a pandas category
     dtype through the build_features.py merges) or float32. Doing this
     explicitly here rather than trusting the saved dtype makes this script
-    self-contained and correct even if an upstream dtype quietly changes."""
+    self-contained and correct even if an upstream dtype quietly changes.
+
+    Also returns the exact category list (in the order pandas assigned
+    codes, i.e. sorted) used for each categorical column, saved into
+    meta.json purely for visibility/debugging -- e.g. "does this model even
+    know about this club yet". It is NOT required for correct scoring:
+    LightGBM's own saved model file already embeds a pandas_categorical
+    mapping per categorical column and re-derives the correct training-time
+    codes automatically for ANY pandas category-dtype column passed to
+    Booster.predict(), no matter what categories that column happens to
+    contain at predict time (confirmed empirically -- a differently-
+    categorized slice produces identical predictions to the original
+    training frame). score_predictions.py relies on that built-in behavior
+    rather than reconstructing categories itself."""
     cat_cols = []
+    cat_categories = {}
     for c in feature_cols:
         dtype = df[c].dtype
         if isinstance(dtype, pd.CategoricalDtype) or pd.api.types.is_object_dtype(dtype) \
                 or pd.api.types.is_string_dtype(dtype):
             df[c] = df[c].astype("category")
             cat_cols.append(c)
+            cat_categories[c] = df[c].cat.categories.tolist()
         elif pd.api.types.is_bool_dtype(dtype):
             df[c] = df[c].astype("float32")
         elif pd.api.types.is_numeric_dtype(dtype) and dtype != np.dtype("float32"):
             df[c] = df[c].astype("float32")
-    return df, cat_cols
+    return df, cat_cols, cat_categories
 
 
 def walk_forward_splits(dates, horizon, n_splits=N_SPLITS, test_days=TEST_DAYS,
@@ -266,14 +281,30 @@ def train_horizon(df, feature_cols, cat_cols, horizon, weights, is_pc):
     final_reg.fit(X_all[final_ret_mask], y_ret[final_ret_mask],
                   sample_weight=weights[final_ret_mask], categorical_feature=cat_cols)
 
+    # Average magnitude of a genuine loss at this horizon (PC-only, matching
+    # the eval scope above) -- the "a" term the position-sizing script needs
+    # for the corrected Kelly formula (f* = p/a - q/b, per PROJECT.md). Not
+    # just "not a win": a row that returned +3% missed the tax-adjusted win
+    # bar but isn't a loss either, and including it would understate how bad
+    # real losses are. Falls back to a conservative flat 10% if too few
+    # genuine losses exist yet to average (e.g. a brand-new horizon/season).
+    loss_mask = is_pc & final_win_mask & (y_ret < 0)
+    if loss_mask.sum() >= 30:
+        avg_loss_magnitude = float(-np.nanmean(y_ret[loss_mask]))
+    else:
+        avg_loss_magnitude = 0.10
+    log(f"  avg_loss_magnitude (PC, horizon={horizon}d, n={int(loss_mask.sum())}): "
+        f"{avg_loss_magnitude:.4f}")
+
     summary = {"horizon": horizon, "n_folds": len(folds),
-               "clf_folds": fold_clf_results, "reg_folds": fold_reg_results}
+               "clf_folds": fold_clf_results, "reg_folds": fold_reg_results,
+               "avg_loss_magnitude": avg_loss_magnitude}
     return final_clf, final_reg, summary
 
 
 def main():
     df, feature_cols, label_cols = load_training_data()
-    df, cat_cols = prepare_features(df, feature_cols)
+    df, cat_cols, cat_categories = prepare_features(df, feature_cols)
     log(f"{len(feature_cols)} feature columns ({len(cat_cols)} categorical: {cat_cols})")
 
     weights = sample_weights(df)
@@ -299,6 +330,7 @@ def main():
 
     meta = {
         "version": version, "feature_cols": feature_cols, "categorical_cols": cat_cols,
+        "categorical_categories": cat_categories,
         "horizons": HORIZONS, "min_rating": MIN_RATING, "fc27_sample_weight": FC27_SAMPLE_WEIGHT,
         "n_rows_trained": len(df), "n_pc_rows_trained": int(is_pc.sum()),
         "eval_scope": "pc_only (trained on console+pc combined; all fold metrics are PC-only)",
