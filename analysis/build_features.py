@@ -301,6 +301,46 @@ def build_price_technicals(prices):
     return df.copy()
 
 
+def add_cross_platform_features(df):
+    """Not true 15-minute/1-hour lead-lag -- we only scrape a handful of
+    times a day, so that resolution doesn't exist in our data -- but the
+    same underlying idea at the granularity we actually have: daily. Two
+    signals: how far the PC/console price ratio has drifted from its own
+    recent normal (mean-reversion), and each platform's most recent move
+    fed as a lagged feature onto the OTHER platform's row (does yesterday's
+    console move predict today's PC move) -- lagged by a day specifically
+    so this is a genuine leading indicator, not same-day lookahead."""
+    wide = df.pivot_table(index=["player_id", "game_version", "date"], columns="platform",
+                           values=["price", "return_1d"])
+    if ("price", "pc") not in wide.columns or ("price", "console") not in wide.columns:
+        return df
+    wide.columns = [f"{v}_{p}" for v, p in wide.columns]
+    wide = wide.reset_index().sort_values(["player_id", "game_version", "date"])
+
+    wide["pc_console_ratio"] = (wide["price_pc"] / wide["price_console"].replace(0, np.nan)).astype("float32")
+    g = wide.groupby(["player_id", "game_version"], sort=False)["pc_console_ratio"]
+    ratio_sma = g.transform(lambda s: s.rolling(7, min_periods=3).mean())
+    ratio_std = g.transform(lambda s: s.rolling(7, min_periods=3).std())
+    wide["pc_console_ratio_zscore_7d"] = ((wide["pc_console_ratio"] - ratio_sma) / ratio_std).astype("float32")
+
+    lag_keys = ["player_id", "game_version"]
+    wide["console_return_1d_prevday"] = wide.groupby(lag_keys, sort=False)["return_1d_console"].shift(1)
+    wide["pc_return_1d_prevday"] = wide.groupby(lag_keys, sort=False)["return_1d_pc"].shift(1)
+
+    keep = ["player_id", "game_version", "date", "pc_console_ratio", "pc_console_ratio_zscore_7d",
+            "console_return_1d_prevday", "pc_return_1d_prevday"]
+    wide = wide[keep]
+    for c in ["console_return_1d_prevday", "pc_return_1d_prevday"]:
+        wide[c] = wide[c].astype("float32")
+
+    df = df.merge(wide, on=["player_id", "game_version", "date"], how="left")
+    df["other_platform_return_1d_prevday"] = np.where(
+        df["platform"] == "pc", df["console_return_1d_prevday"], df["pc_return_1d_prevday"]
+    ).astype("float32")
+    df = df.drop(columns=["console_return_1d_prevday", "pc_return_1d_prevday"])
+    return df.copy()
+
+
 def add_relative_strength(df, indices_daily):
     own = indices_daily.rename(columns={"band": "band"})
     df = df.merge(
@@ -383,6 +423,10 @@ def main():
     gap_rate = (df["days_since_prev_point"] > 1).mean()
     log(f"  NOTE: {gap_rate:.1%} of rows have a >1-day gap since the previous "
         f"price point for that player (affects how exact horizon/window math is)")
+
+    log("Adding cross-platform (PC vs console) lead-lag + ratio features...")
+    df = add_cross_platform_features(df)
+    log(f"  {len(df)} rows, {mem_mb(df):.1f} MB")
 
     log("Merging player metadata (rating, band, league, position, ...)...")
     df = df.merge(players, on=["player_id", "game_version"], how="left")
