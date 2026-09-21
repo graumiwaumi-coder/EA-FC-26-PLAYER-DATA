@@ -116,11 +116,23 @@ EXTRACT_JS = r"""
     }
 
     function cardInfo(link) {
+        // Climb one level at a time, keeping the last ancestor that still
+        // contains exactly ONE player link -- stop the moment climbing
+        // further would pull in a sibling card too. A fixed climb depth
+        // (the previous approach) grabbed a shared container covering
+        // multiple cards on this page, so every card in a section came
+        // back with identical text -- confirmed live (2026-09-21).
+        let container = link;
         let el = link;
-        for (let i = 0; i < 3 && el.parentElement; i++) el = el.parentElement;
+        for (let i = 0; i < 8 && el.parentElement; i++) {
+            el = el.parentElement;
+            const n = el.querySelectorAll('a[href^="/27/player/"]').length;
+            if (n > 1) break;
+            container = el;
+        }
         return {
             href: link.getAttribute('href'),
-            text: el.innerText.replace(/\s+/g, ' ').trim().slice(0, 300),
+            text: container.innerText.replace(/\s+/g, ' ').trim().slice(0, 300),
         };
     }
 
@@ -317,6 +329,7 @@ async def main():
                         "rating": parsed["rating"], "price": parsed["price"],
                         "pct_change": parsed["pct_change"], "section": section,
                         "index": index_name, "scraped_at": scraped_at,
+                        "raw_text": parsed["raw_text"],
                     }) + "\n")
                     seen_player_ids.add(parsed["player_id"])
             players_f.flush()
