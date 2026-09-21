@@ -26,6 +26,47 @@ sys.path.insert(0, str(ROOT / "analysis"))
 
 import recommendations_db as rdb  # noqa: E402
 import job_runner as jr  # noqa: E402
+from build_features import EA_SELL_TAX  # noqa: E402
+
+
+def build_plan(buy, bankroll, max_positions=10):
+    """Turns the ranked BUY list into an actual spending plan: walk down by
+    opportunity-cost-adjusted return, buy what's affordable with whatever
+    of the bankroll is still left, stop once funds run out or
+    max_positions is hit. This is deliberately different from each row's
+    own recommended_quantity/recommended_coins (which sizes that ONE card
+    as if it had the whole bankroll to itself, so every row can be judged
+    on its own merits) -- this is "spend your real, finite bankroll across
+    these specific picks, in this order," which is what a person deciding
+    what to actually go buy needs."""
+    if buy.empty or bankroll <= 0:
+        return pd.DataFrame(), 0.0
+    ranked = buy.sort_values("effective_daily_return", ascending=False).reset_index(drop=True)
+    remaining = bankroll
+    picks = []
+    for _, row in ranked.iterrows():
+        if len(picks) >= max_positions:
+            break
+        price = row["price_at_snapshot"]
+        if pd.isna(price) or price <= 0 or price > remaining:
+            continue
+        cap_coins = min(row["kelly_fraction"] * bankroll, remaining)
+        qty = int(cap_coins // price)
+        if qty < 1:
+            continue
+        cost = qty * price
+        remaining -= cost
+        expected_sell_price = price * (1 + row["predicted_return_pct"])
+        expected_profit_per_copy = expected_sell_price * (1 - EA_SELL_TAX) - price
+        picks.append({
+            "url": row["url"], "position": row["position"], "club": row["club"],
+            "horizon_days": row["horizon_days"], "buy_price": price, "quantity": qty,
+            "coins_spent": cost, "predicted_win_prob": row["predicted_win_prob"],
+            "expected_sell_price": expected_sell_price,
+            "expected_profit": qty * expected_profit_per_copy,
+            "confidence_flag": row["confidence_flag"],
+        })
+    return pd.DataFrame(picks), remaining
 
 st.set_page_config(page_title="FC27 Live Trading", layout="wide")
 
@@ -106,6 +147,51 @@ with c1:
         rdb.set_bankroll(new_bankroll)
         st.success(f"Saved -- {new_bankroll:,.0f} coins. Click 'Rebuild features & rescore' to "
                    f"re-size the BUY list against it.")
+
+st.divider()
+
+# ------------------------------------------------------------------ today's plan
+st.header("Today's plan")
+st.caption("An actual spend plan, not a menu: your real bankroll, spent on the best-ranked picks "
+           "it can afford, in order, until the money runs out. Buy these, hold for the horizon "
+           "shown, then sell.")
+
+buy_for_plan = rdb.load_latest_buy_list()
+if buy_for_plan.empty:
+    st.info("No BUY recommendations yet -- nothing to plan around.")
+else:
+    max_positions = st.slider("Max number of different cards in the plan", 1, 20, 10)
+    plan, leftover = build_plan(buy_for_plan, current_bankroll, max_positions)
+    if plan.empty:
+        st.warning(f"Nothing in the current buy list is affordable at a {current_bankroll:,.0f}-coin "
+                   f"bankroll. Cheapest candidate: {buy_for_plan['price_at_snapshot'].min():,.0f} coins.")
+    else:
+        st.dataframe(
+            plan[["url", "position", "club", "horizon_days", "buy_price", "quantity", "coins_spent",
+                  "predicted_win_prob", "expected_sell_price", "expected_profit", "confidence_flag"]],
+            use_container_width=True, hide_index=True,
+            column_config={
+                "buy_price": st.column_config.NumberColumn("Buy at", format="%d"),
+                "quantity": st.column_config.NumberColumn("Copies"),
+                "coins_spent": st.column_config.NumberColumn("Coins spent", format="%d"),
+                "predicted_win_prob": st.column_config.ProgressColumn(
+                    "Win probability", min_value=0.0, max_value=1.0, format="%.0f%%"),
+                "expected_sell_price": st.column_config.NumberColumn("Expected sell price", format="%d"),
+                "expected_profit": st.column_config.NumberColumn("Expected profit (net of tax)", format="%d"),
+                "horizon_days": st.column_config.NumberColumn("Hold for (days)"),
+            },
+        )
+        total_spend = plan["coins_spent"].sum()
+        total_profit = plan["expected_profit"].sum()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total coins spent", f"{total_spend:,.0f}")
+        c2.metric("Left over", f"{leftover:,.0f}")
+        c3.metric("Expected total profit (if it plays out)", f"{total_profit:,.0f}",
+                   f"{(total_profit / total_spend):.1%}" if total_spend else None)
+        st.caption("\"Expected profit\" assumes every pick hits its predicted return -- in reality "
+                   "some will and some won't, which is exactly what the win probability column "
+                   "tells you. Treat this as the plan's best case, weighted by how confident the "
+                   "model is in each pick, not a guarantee.")
 
 st.divider()
 
