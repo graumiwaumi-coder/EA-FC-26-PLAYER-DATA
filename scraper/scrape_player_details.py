@@ -155,7 +155,7 @@ async def dismiss_cookie_banner(tab):
     real content doesn't finish rendering underneath this banner, which
     silently looked like an empty/blocked page rather than what it was."""
     try:
-        await tab.evaluate("""
+        await asyncio.wait_for(tab.evaluate("""
         (() => {
             const btn = document.querySelector('#onetrust-reject-all-handler') ||
                         Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Reject All') ||
@@ -163,7 +163,7 @@ async def dismiss_cookie_banner(tab):
             if (btn) { btn.click(); return true; }
             return false;
         })()
-        """)
+        """), timeout=EVALUATE_TIMEOUT)
     except Exception:
         pass
 
@@ -202,8 +202,21 @@ def load_market_players():
     return players
 
 
+EVALUATE_TIMEOUT = 10
+
+
 async def evaluate_json(tab, js, default):
-    raw = await tab.evaluate(js)
+    """tab.evaluate() with no outer timeout was the ACTUAL cause of the
+    original hang (confirmed by that run's own traceback: it was stuck
+    here, not in tab.get()) -- a page can load fine and still leave the
+    tab unresponsive to CDP evaluate calls. Bounded the same way get_page()
+    bounds navigation: a timeout here is treated as "not ready this
+    iteration" so the caller's own poll loop keeps trying instead of the
+    whole run freezing on one wedged tab."""
+    try:
+        raw = await asyncio.wait_for(tab.evaluate(js), timeout=EVALUATE_TIMEOUT)
+    except asyncio.TimeoutError:
+        return default
     if isinstance(raw, dict):
         raw = raw.get("value")
     try:

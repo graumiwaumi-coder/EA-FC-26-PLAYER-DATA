@@ -99,7 +99,7 @@ async def dismiss_cookie_banner(tab):
     real content doesn't finish rendering underneath this banner, which
     silently looked like an empty/blocked page rather than what it was."""
     try:
-        await tab.evaluate("""
+        await asyncio.wait_for(tab.evaluate("""
         (() => {
             const btn = document.querySelector('#onetrust-reject-all-handler') ||
                         Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Reject All') ||
@@ -107,7 +107,7 @@ async def dismiss_cookie_banner(tab):
             if (btn) { btn.click(); return true; }
             return false;
         })()
-        """)
+        """), timeout=EVALUATE_TIMEOUT)
     except Exception:
         pass
 
@@ -130,10 +130,18 @@ def parse_body(body_text):
     return m
 
 
+EVALUATE_TIMEOUT = 10
+
+
 async def extract_everything(tab):
+    """tab.evaluate() itself is bounded, not just tab.get() -- a loaded
+    page can still leave the tab unresponsive to CDP evaluate calls, which
+    is what actually caused the original hang on this same scraper's
+    sibling script (confirmed by that run's own traceback)."""
     elapsed = 0.0
     while elapsed < MAX_WAIT_SECONDS:
-        raw = await tab.evaluate("""
+        try:
+            raw = await asyncio.wait_for(tab.evaluate("""
         (() => {
             const pc = document.querySelector('[data-pc-data]');
             const ps = document.querySelector('[data-ps-data]');
@@ -176,7 +184,9 @@ async def extract_everything(tab):
                 current_price_platform: activePlatform,
             });
         })()
-        """)
+        """), timeout=EVALUATE_TIMEOUT)
+        except asyncio.TimeoutError:
+            raw = "{}"
         if isinstance(raw, dict):
             raw = raw.get("value", "{}")
         try:
@@ -293,9 +303,12 @@ async def scrape_popular_list(tab):
     elapsed = 0.0
     hrefs = []
     while elapsed < MAX_WAIT_SECONDS:
-        raw = await tab.evaluate(
-            """JSON.stringify(Array.from(document.querySelectorAll('a.playercard-wrapper[href^="/27/player/"]')).map(a => a.getAttribute('href')))"""
-        )
+        try:
+            raw = await asyncio.wait_for(tab.evaluate(
+                """JSON.stringify(Array.from(document.querySelectorAll('a.playercard-wrapper[href^="/27/player/"]')).map(a => a.getAttribute('href')))"""
+            ), timeout=EVALUATE_TIMEOUT)
+        except asyncio.TimeoutError:
+            raw = "[]"
         if isinstance(raw, dict):
             raw = raw.get("value", "[]")
         try:

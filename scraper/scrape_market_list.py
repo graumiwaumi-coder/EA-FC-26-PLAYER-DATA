@@ -166,7 +166,7 @@ async def dismiss_cookie_banner(tab):
     rendering underneath this banner, which is why every row extraction
     was silently coming back empty -- not a CAPTCHA or a bot-block."""
     try:
-        await tab.evaluate("""
+        await asyncio.wait_for(tab.evaluate("""
         (() => {
             const btn = document.querySelector('#onetrust-reject-all-handler') ||
                         Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Reject All') ||
@@ -174,7 +174,7 @@ async def dismiss_cookie_banner(tab):
             if (btn) { btn.click(); return true; }
             return false;
         })()
-        """)
+        """), timeout=EVALUATE_TIMEOUT)
     except Exception:
         pass
 
@@ -186,11 +186,21 @@ def parse_player_id(url):
     return int(m.group(1)) if m else None
 
 
+EVALUATE_TIMEOUT = 10
+
+
 async def extract_rows(tab):
-    """Poll until the table has actually rendered rows (or times out)."""
+    """Poll until the table has actually rendered rows (or times out).
+    tab.evaluate() itself is bounded here too -- a loaded page can still
+    leave the tab unresponsive to CDP evaluate calls, which is what
+    actually caused the original hang on a different scraper's identical
+    pattern (confirmed by that run's own traceback)."""
     elapsed = 0.0
     while elapsed < MAX_WAIT_SECONDS:
-        raw = await tab.evaluate(EXTRACT_JS)
+        try:
+            raw = await asyncio.wait_for(tab.evaluate(EXTRACT_JS), timeout=EVALUATE_TIMEOUT)
+        except asyncio.TimeoutError:
+            raw = "[]"
         if isinstance(raw, dict):
             raw = raw.get("value", "[]")
         try:
