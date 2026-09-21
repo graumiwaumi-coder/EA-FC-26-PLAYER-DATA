@@ -1,16 +1,42 @@
+#!/usr/bin/env python3
 """
-Phase 1 (expanded): full feature set for model training.
+Stage 2: builds the full engineered feature + label panel used to train the
+model, from the merged tables in data/. Ground-up rebuild (see PROJECT.md) --
+every feature here is new, not ported from the old build.
 
-Reads data/players_features.parquet, data/prices_long.parquet, data/indices.parquet,
-     data/macro_wide.parquet
-Writes data/prices_features.parquet -- one row per (player_id, platform, date) with a
-large set of technical/momentum features, cross-platform features, macro/index context,
-and multi-horizon forward returns (training targets).
+Feature groups:
+  - price technicals: multi-horizon returns, moving averages, RSI, MACD,
+    Bollinger-style range position
+  - volatility: rolling vol at several windows, a short-vs-long "regime"
+    ratio, a shock/anomaly z-score for today's move
+  - relative strength: player return vs. both their own rating-tier index
+    and the overall market index (from market_indices.parquet)
+  - liquidity/order-flow: sell-through rate, discount to listed price,
+    buy-now vs. bid mix, EA tax turnover (from real sales_history rows)
+  - market context: gap to EA's own suggested average price, daily
+    high/low range (from live_snapshots.parquet)
+  - cross-sectional: how a card's price/momentum ranks against same
+    rating-tier peers on the same day
+  - cyclical: day of week, weekend flag, days since this game's season
+    started, and (when data/indices.parquet -- the old FC26 historical
+    index export -- is present) an explicit FC26-vs-FC27 same-week lookup
+  - card metadata: rating, position, league, nation, skills, etc.
 
-Run: python3 build_player_features.py && python3 build_index_features.py && python3 build_features.py
-(player + index features must be built first)
+Labels: forward return + a tax-aware win flag (net of EA's 5% sell tax,
+not just any gross increase) at HORIZONS calendar days ahead, per
+(player_id, game_version, platform).
+
+Known simplification: rolling/return windows are computed over ROWS, not
+strict calendar days -- i.e. they assume close to one row per calendar day.
+`days_since_prev_point` is emitted specifically so this assumption can be
+checked (and fed to the model) rather than silently trusted; the run
+summary prints how common a real gap is.
+
+Run: python3 build_features.py
+Writes: data/feature_panel.parquet
 """
 import gc
+import json
 from pathlib import Path
 
 import numpy as np
@@ -19,223 +45,393 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 
+BLACKLIST_PATH = DATA_DIR / "no_market_blacklist.json"
+OLD_INDICES_PATH = DATA_DIR / "indices.parquet"  # FC26-era historical index export, optional
+OUT_PATH = DATA_DIR / "feature_panel.parquet"
 
-def _downcast(df):
-    """float64 -> float32 in place. Every other feature-building script in this
-    pipeline already does this (train_model.py, tune_hyperparameters.py,
-    build_features_v2.py) -- this one never got it, and now that the price panel
-    carries FC27 alongside FC26 (plus an extra join-key column), it's the reason
-    a run that used to fit in 11GB RAM got OOM-killed. Called after every stage
-    below instead of once at the end, since it's peak memory during the run that
-    matters, not just the final size."""
-    float_cols = df.select_dtypes(include=["float64"]).columns
-    df[float_cols] = df[float_cols].astype("float32")
-    gc.collect()
+HORIZONS = [1, 3, 7, 14, 21, 30]
+ROLL_WINDOWS = [3, 7, 14, 21, 30]
+EA_SELL_TAX = 0.05
+WIN_BREAKEVEN = 1 / (1 - EA_SELL_TAX) - 1  # a trade must clear this to be a net win, not just gross-up
+
+KEYS = ["player_id", "game_version", "platform"]
+
+PLATFORM_NORMALIZE = {"ps": "console", "pc": "pc", "console": "console"}
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def mem_mb(df):
+    return df.memory_usage(deep=True).sum() / 1e6
+
+
+# ---------------------------------------------------------------- loading
+
+def load_blacklist():
+    if not BLACKLIST_PATH.exists():
+        return set()
+    records = json.loads(BLACKLIST_PATH.read_text())
+    return {(r["player_id"], r["game_version"]) for r in records}
+
+
+def load_players():
+    df = pd.read_parquet(DATA_DIR / "players.parquet")
+    keep = ["id", "game_version", "rating", "position", "nation", "league", "club",
+            "squad", "skills", "weak_foot", "height_cm", "foot", "body_type", "age",
+            "n_playstyles", "band"]
+    df = df[keep].rename(columns={"id": "player_id"})
+    df = df.sort_values("player_id").drop_duplicates(["player_id", "game_version"], keep="last")
+    for c in ["rating", "skills", "weak_foot", "height_cm", "age"]:
+        df[c] = df[c].astype("float32")
+    df["n_playstyles"] = df["n_playstyles"].astype("float32")
+    for c in ["position", "nation", "league", "club", "squad", "foot", "body_type", "band", "game_version"]:
+        df[c] = df[c].astype("category")
+    df["is_icon"] = (df["league"].astype(str) == "Icons") | (df["band"].astype(str) == "icons")
     return df
 
 
-MIN_TRADEABLE_PRICE = 1
-SELL_TAX = 0.05
-FORWARD_HORIZONS = (7, 14, 21, 30)
-
-
-def _pid_keys(df, *extra):
-    """player_id alone isn't a stable key once FC26 and FC27 coexist in the same
-    table -- the scraper assigns numeric ids per-game, and ~85% of FC27 cards
-    happen to reuse an FC26 card's id (confirmed empirically, not a rare edge
-    case). Every groupby/merge keyed on player_id needs game_version folded in
-    too, or a colliding id's two unrelated cards get treated as one continuous
-    price history."""
-    keys = ["player_id", *extra]
-    if "game_version" in df.columns:
-        keys = keys + ["game_version"]
-    return keys
-
-
-def rsi(price, window=14):
-    delta = price.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window, min_periods=window // 2).mean()
-    avg_loss = loss.rolling(window, min_periods=window // 2).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-
-def build_price_features(prices, players):
-    prices = prices.sort_values(["player_id", "platform", "date"]).reset_index(drop=True)
-    prices["price_clean"] = prices["price"].where(prices["price"] >= MIN_TRADEABLE_PRICE)
-
-    g = prices.groupby(_pid_keys(prices, "platform"), sort=False)["price_clean"]
-
-    for w in (3, 7, 14, 30, 60, 90):
-        prices[f"ma_{w}"] = g.transform(lambda s, w=w: s.rolling(w, min_periods=max(3, w // 3)).mean())
-    for w in (7, 14, 30, 60):
-        prices[f"std_{w}"] = g.transform(lambda s, w=w: s.rolling(w, min_periods=max(3, w // 3)).std())
-        prices[f"volatility_{w}"] = prices[f"std_{w}"] / prices[f"ma_{w}"]
-    for w in (1, 3, 7, 14, 30, 60, 90):
-        prices[f"pct_change_{w}d"] = g.transform(lambda s, w=w: s.pct_change(periods=w))
-
-    prices["roll_min_30"] = g.transform(lambda s: s.rolling(30, min_periods=7).min())
-    prices["roll_max_30"] = g.transform(lambda s: s.rolling(30, min_periods=7).max())
-    prices["roll_min_90"] = g.transform(lambda s: s.rolling(90, min_periods=14).min())
-    prices["roll_max_90"] = g.transform(lambda s: s.rolling(90, min_periods=14).max())
-
-    prices["pct_off_90d_high"] = (prices["roll_max_90"] - prices["price_clean"]) / prices["roll_max_90"]
-    prices["pct_above_90d_low"] = (prices["price_clean"] - prices["roll_min_90"]) / prices["roll_min_90"]
-    denom_30 = (prices["roll_max_30"] - prices["roll_min_30"]).replace(0, np.nan)
-    prices["season_position_30"] = (prices["price_clean"] - prices["roll_min_30"]) / denom_30
-
-    prices["rsi_14"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)["price_clean"].transform(
-        lambda s: rsi(s, 14)
-    )
-    prices["macd_norm"] = (prices["ma_7"] - prices["ma_30"]) / prices["ma_30"]
-
-    prices["skew_30"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)["pct_change_1d"].transform(
-        lambda s: s.rolling(30, min_periods=10).skew()
-    )
-
-    prices["tradeable"] = (prices["price"] > 0).astype(float)
-    prices["liquidity_14"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)["tradeable"].transform(
-        lambda s: s.rolling(14, min_periods=5).mean()
-    )
-
-    prices["bollinger_z_30"] = (prices["price_clean"] - prices["ma_30"]) / prices["std_30"]
-
-    return prices
-
-
-def add_cross_platform(prices):
-    idx_keys = _pid_keys(prices, "date")
-    pivot = prices.pivot_table(index=idx_keys, columns="platform", values="price_clean")
-    pivot = pivot.rename(columns={"pc": "pc_price_same_day", "console": "console_price_same_day"})
-    pivot = pivot.reset_index()
-
-    mom = prices.pivot_table(index=idx_keys, columns="platform", values="pct_change_7d")
-    mom = mom.rename(columns={"pc": "pc_pct_change_7d_x", "console": "console_pct_change_7d_x"}).reset_index()
-
-    prices = prices.merge(pivot, on=idx_keys, how="left")
-    prices = prices.merge(mom, on=idx_keys, how="left")
-
-    is_pc = prices["platform"] == "pc"
-    prices["other_platform_price"] = np.where(is_pc, prices["console_price_same_day"], prices["pc_price_same_day"])
-    prices["other_platform_pct_change_7d"] = np.where(
-        is_pc, prices["console_pct_change_7d_x"], prices["pc_pct_change_7d_x"]
-    )
-    prices["own_to_other_platform_ratio"] = prices["price_clean"] / prices["other_platform_price"]
-
-    prices = prices.drop(columns=["pc_price_same_day", "console_price_same_day",
-                                   "pc_pct_change_7d_x", "console_pct_change_7d_x"])
-    return prices
-
-
-def _fc26_only_join_keys(prices, base_keys):
-    """indices.parquet/indices_features.parquet/macro_wide.parquet predate the FC26/FC27
-    distinction and have no FC27 equivalent yet -- band/platform/date alone isn't a safe
-    join key once two games' data coexist in the same table (an FC27 row could silently
-    borrow an FC26 index value just because the calendar date happens to coincide).
-    Tags the index side as game_version="fc26" and, if `prices` has a game_version
-    column, requires it in the join key too, so an FC27 row simply gets no match (NaN,
-    correct) instead of a wrong cross-game one. If `prices` has no game_version column
-    at all (pre-FC27 pipeline runs), joins on the base keys alone -- unambiguous since
-    only FC26 data exists in that case."""
-    if "game_version" in prices.columns:
-        return base_keys + ["game_version"]
-    return base_keys
-
-
-def _tag_fc26(df):
-    df = df.copy()
-    df["game_version"] = "fc26"
+def load_prices(blacklist):
+    df = pd.read_parquet(DATA_DIR / "prices_long.parquet")
+    df["price"] = df["price"].replace(0, np.nan).astype("float32")
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+    df = df.drop_duplicates(KEYS + ["date"])
+    if blacklist:
+        mask = ~df.set_index(["player_id", "game_version"]).index.isin(blacklist)
+        before = len(df)
+        df = df[mask]
+        log(f"[prices] dropped {before - len(df)} rows for blacklisted (no-market) players")
     return df
 
 
-def add_index_context(prices, players):
-    has_gv = "game_version" in prices.columns and "game_version" in players.columns
-    player_cols = ["id", "rating", "band"] + (["game_version"] if has_gv else [])
-    player_meta = players[player_cols].rename(columns={"id": "player_id"})
-    merge_keys = ["player_id", "game_version"] if has_gv else ["player_id"]
-    prices = prices.merge(player_meta, on=merge_keys, how="left")
-    prices = _downcast(prices)
+def load_indices_daily():
+    """Live FC27 index data -- resampled from ~minutely to one value/day (the
+    day's mean) so it lines up with the daily player-price panel."""
+    df = pd.read_parquet(DATA_DIR / "market_indices.parquet")
+    df["platform"] = df["platform"].map(PLATFORM_NORMALIZE).fillna(df["platform"])
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+    daily = (df.groupby(["index_tier", "platform", "date"], as_index=False)["price"]
+             .mean().rename(columns={"price": "index_value", "index_tier": "band"}))
+    daily["index_value"] = daily["index_value"].astype("float32")
+    daily = daily.sort_values(["band", "platform", "date"])
+    g = daily.groupby(["band", "platform"], sort=False)["index_value"]
+    daily["index_return_1d"] = g.pct_change().astype("float32")
+    for w in ROLL_WINDOWS:
+        daily[f"index_return_{w}d"] = g.pct_change(w).astype("float32")
+    ret1 = daily.groupby(["band", "platform"], sort=False)["index_return_1d"]
+    daily["index_vol_7d"] = ret1.transform(lambda s: s.rolling(7, min_periods=3).std()).astype("float32")
+    return daily
 
-    indices = _downcast(_tag_fc26(pd.read_parquet(DATA_DIR / "indices_features.parquet")))
-    base_keys = ["band", "platform", "date"]
-    join_keys = _fc26_only_join_keys(prices, base_keys)
-    idx_cols = ["band", "platform", "date", "game_version", "index_value", "idx_pct_change_7d",
-                "idx_pct_change_14d", "idx_pct_change_30d", "idx_momentum_pctile_90"]
-    prices = prices.merge(
-        indices[idx_cols].rename(columns={c: f"band_{c}" for c in idx_cols if c not in join_keys}),
-        on=join_keys, how="left",
+
+def load_old_fc26_indices():
+    if not OLD_INDICES_PATH.exists():
+        log("[fc26_indices] data/indices.parquet not found -- skipping FC26-vs-FC27 "
+            "same-week lookup feature (safe to skip, everything else still works)")
+        return None
+    df = pd.read_parquet(OLD_INDICES_PATH)
+    df["platform"] = df["platform"].map(PLATFORM_NORMALIZE).fillna(df["platform"])
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+    df["index_value"] = df["index_value"].astype("float32")
+    df = df.sort_values(["band", "platform", "date"])
+    df["day_of_season"] = (df["date"] - df.groupby(["band", "platform"])["date"].transform("min")).dt.days
+    g = df.groupby(["band", "platform"], sort=False)["index_value"]
+    df["index_return_7d"] = g.pct_change(7).astype("float32")
+    return df[["band", "platform", "day_of_season", "index_value", "index_return_7d"]].rename(
+        columns={"index_value": "fc26_index_value_same_week", "index_return_7d": "fc26_index_return_7d_same_week"}
     )
-    del indices
-    prices = _downcast(prices)
-    prices["price_to_band_index_ratio"] = prices["price_clean"] / prices["band_index_value"]
-    prices["band_ratio_zscore_60d"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)[
-        "price_to_band_index_ratio"
-    ].transform(lambda s: (s - s.rolling(60, min_periods=14).mean()) / s.rolling(60, min_periods=14).std())
-    prices = _downcast(prices)
-
-    macro = _downcast(_tag_fc26(pd.read_parquet(DATA_DIR / "macro_wide.parquet")))
-    join_keys_macro = _fc26_only_join_keys(prices, ["platform", "date"])
-    prices = prices.merge(macro, on=join_keys_macro, how="left")
-    del macro
-    prices = _downcast(prices)
-    prices["price_to_index100_ratio"] = prices["price_clean"] / prices["index100_index_value"]
-    prices["index100_ratio_zscore_60d"] = prices.groupby(_pid_keys(prices, "platform"), sort=False)[
-        "price_to_index100_ratio"
-    ].transform(lambda s: (s - s.rolling(60, min_periods=14).mean()) / s.rolling(60, min_periods=14).std())
-    prices = _downcast(prices)
-
-    return prices
 
 
-def add_forward_returns(prices):
-    prices = prices.sort_values(["player_id", "platform", "date"])
-    g = prices.groupby(_pid_keys(prices, "platform"), sort=False)["price_clean"]
-    for h in FORWARD_HORIZONS:
-        fwd_price = g.transform(lambda s, h=h: s.shift(-h))
-        prices[f"fwd_return_{h}d"] = (fwd_price - prices["price_clean"]) / prices["price_clean"]
-        prices[f"fwd_return_{h}d_net_tax"] = (fwd_price * (1 - SELL_TAX) - prices["price_clean"]) / prices["price_clean"]
-        prices[f"fwd_up_{h}d_net_tax"] = (prices[f"fwd_return_{h}d_net_tax"] > 0).astype("Int8")
-        prices.loc[prices[f"fwd_return_{h}d"].isna(), f"fwd_up_{h}d_net_tax"] = pd.NA
-    return prices
+def _parse_money(s):
+    if s is None:
+        return np.nan
+    s = str(s).strip().replace(",", "")
+    if s in ("", "-", "N/A", "None", "none", "nan", "NaN"):
+        return np.nan
+    try:
+        return float(s)
+    except ValueError:
+        return np.nan
 
 
-def add_calendar(prices):
-    prices["day_of_week"] = prices["date"].dt.dayofweek
-    prices["is_weekend"] = prices["day_of_week"].isin([5, 6])
-    min_date = prices["date"].min()
-    prices["days_since_start"] = (prices["date"] - min_date).dt.days
-    return prices
+def _parse_sale_dates(date_strs, scraped_at):
+    """'Sep 19, 8:48 PM' has no year -- infer it from the scrape timestamp
+    (the site always shows recent history), then correct any sale that
+    lands AFTER its own scrape time by rolling it back a year (a Dec sale
+    seen by a Jan scrape, not a future sale)."""
+    years = scraped_at.dt.year.fillna(pd.Timestamp.now().year).astype(int)
+    combined = date_strs.fillna("") + ", " + years.astype(str)
+    parsed = pd.to_datetime(combined, format="%b %d, %I:%M %p, %Y", errors="coerce")
+    future_mask = parsed > scraped_at
+    parsed = parsed.where(~future_mask, parsed - pd.DateOffset(years=1))
+    return parsed
+
+
+def load_sales_daily():
+    path = DATA_DIR / "sales_history.parquet"
+    if not path.exists():
+        log("[sales] sales_history.parquet not found -- skipping liquidity features")
+        return None
+    df = pd.read_parquet(path)
+    if df.empty:
+        return None
+
+    df["sold_for_num"] = df["sold_for"].map(_parse_money)
+    df["listed_for_num"] = df["listed_for"].map(_parse_money)
+    df["ea_tax_num"] = df["ea_tax"].map(_parse_money)
+
+    scraped_at = pd.to_datetime(df["_first_seen_scraped_at"], errors="coerce")
+    sale_dt = _parse_sale_dates(df["date"], scraped_at)
+    df["date"] = sale_dt.dt.normalize()
+    df = df.dropna(subset=["date"])
+
+    df["is_sold"] = df["sold_for_num"].fillna(0) > 0
+    df["is_buy_now"] = df["type"].fillna("").str.strip().str.lower().eq("buy now")
+    df["discount_pct"] = np.where(
+        df["is_sold"] & (df["listed_for_num"] > 0),
+        (df["listed_for_num"] - df["sold_for_num"]) / df["listed_for_num"],
+        np.nan,
+    )
+    df["sold_price_if_sold"] = np.where(df["is_sold"], df["sold_for_num"], np.nan)
+    df["buy_now_and_sold"] = df["is_buy_now"] & df["is_sold"]
+
+    daily = df.groupby(["player_id", "platform", "date"]).agg(
+        n_listings=("is_sold", "size"),
+        n_sold=("is_sold", "sum"),
+        n_buy_now_sold=("buy_now_and_sold", "sum"),
+        avg_sold_price=("sold_price_if_sold", "mean"),
+        avg_discount_pct=("discount_pct", "mean"),
+        total_ea_tax_paid=("ea_tax_num", "sum"),
+    ).reset_index()
+
+    daily["sell_through_rate"] = (daily["n_sold"] / daily["n_listings"]).astype("float32")
+    daily["buy_now_share"] = (daily["n_buy_now_sold"] / daily["n_sold"].replace(0, np.nan)).astype("float32")
+    for c in ["n_listings", "n_sold", "avg_sold_price", "avg_discount_pct", "total_ea_tax_paid"]:
+        daily[c] = daily[c].astype("float32")
+    daily["platform"] = daily["platform"].map(PLATFORM_NORMALIZE).fillna(daily["platform"])
+    return daily.drop(columns=["n_buy_now_sold"])
+
+
+def load_snapshots_daily():
+    path = DATA_DIR / "live_snapshots.parquet"
+    if not path.exists():
+        log("[snapshots] live_snapshots.parquet not found -- skipping EA-average/range features")
+        return None
+    df = pd.read_parquet(path)
+    if df.empty:
+        return None
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+    agg = df.groupby(["player_id", "platform", "date"]).agg(
+        snap_price_last=("price", "last"),
+        ea_average_last=("ea_average", "last"),
+        trend_pct_last=("trend_pct", "last"),
+        daily_high=("daily_high", "max"),
+        daily_low=("daily_low", "min"),
+        live_high=("live_high", "max"),
+        live_low=("live_low", "min"),
+        live_avg=("live_avg", "mean"),
+        n_snapshots=("price", "size"),
+    ).reset_index()
+    agg["price_vs_ea_avg_pct"] = (
+        (agg["snap_price_last"] - agg["ea_average_last"]) / agg["ea_average_last"]
+    )
+    agg["daily_range_pct"] = (
+        (agg["daily_high"] - agg["daily_low"]) / agg["daily_low"]
+    )
+    num_cols = ["snap_price_last", "ea_average_last", "trend_pct_last", "daily_high", "daily_low",
+                "live_high", "live_low", "live_avg", "price_vs_ea_avg_pct", "daily_range_pct"]
+    for c in num_cols:
+        agg[c] = agg[c].astype("float32")
+    agg["platform"] = agg["platform"].map(PLATFORM_NORMALIZE).fillna(agg["platform"])
+    return agg
+
+
+# ---------------------------------------------------------------- technicals
+
+def build_price_technicals(prices):
+    df = prices.sort_values(KEYS + ["date"]).reset_index(drop=True)
+
+    def grouped(col):
+        return df.groupby(KEYS, sort=False)[col]
+
+    prev_date = grouped("date").transform(lambda s: s.diff().dt.days)
+    df["days_since_prev_point"] = prev_date.astype("float32")
+
+    df["return_1d"] = grouped("price").transform(lambda s: s.pct_change(1)).astype("float32")
+    for h in HORIZONS:
+        if h == 1:
+            continue
+        df[f"return_{h}d"] = grouped("price").transform(lambda s: s.pct_change(h)).astype("float32")
+
+    for w in ROLL_WINDOWS:
+        mp = max(2, w // 2)
+        roll_mean = grouped("price").transform(lambda s: s.rolling(w, min_periods=mp).mean())
+        roll_std = grouped("price").transform(lambda s: s.rolling(w, min_periods=mp).std())
+        roll_min = grouped("price").transform(lambda s: s.rolling(w, min_periods=mp).min())
+        roll_max = grouped("price").transform(lambda s: s.rolling(w, min_periods=mp).max())
+        df[f"sma_{w}d"] = roll_mean.astype("float32")
+        df[f"vol_{w}d"] = roll_std.astype("float32")
+        df[f"zscore_{w}d"] = ((df["price"] - roll_mean) / roll_std).astype("float32")
+        rng = (roll_max - roll_min).replace(0, np.nan)
+        df[f"pct_of_range_{w}d"] = ((df["price"] - roll_min) / rng).astype("float32")
+
+    df["vol_regime_7_30"] = (df["vol_7d"] / df["vol_30d"].replace(0, np.nan)).astype("float32")
+    # today's move sized against 30d volatility, both expressed as returns --
+    # how many "typical days" today's move is worth
+    vol_30d_pct = (df["vol_30d"] / df["sma_30d"].replace(0, np.nan))
+    df["shock_score"] = (df["return_1d"] / vol_30d_pct.replace(0, np.nan)).astype("float32")
+
+    df["ema_fast"] = grouped("price").transform(lambda s: s.ewm(span=7, min_periods=3).mean()).astype("float32")
+    df["ema_slow"] = grouped("price").transform(lambda s: s.ewm(span=21, min_periods=5).mean()).astype("float32")
+    df["macd"] = (df["ema_fast"] - df["ema_slow"]).astype("float32")
+    df["macd_pct"] = (df["macd"] / df["ema_slow"].replace(0, np.nan)).astype("float32")
+
+    df["_delta"] = grouped("price").transform(lambda s: s.diff())
+    df["_gain"] = df["_delta"].clip(lower=0)
+    df["_loss"] = (-df["_delta"]).clip(lower=0)
+    avg_gain = df.groupby(KEYS, sort=False)["_gain"].transform(lambda s: s.rolling(14, min_periods=5).mean())
+    avg_loss = df.groupby(KEYS, sort=False)["_loss"].transform(lambda s: s.rolling(14, min_periods=5).mean())
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    df["rsi_14d"] = (100 - 100 / (1 + rs)).astype("float32")
+    df = df.drop(columns=["_delta", "_gain", "_loss"])
+
+    # dozens of columns were added one at a time above -- consolidate the
+    # underlying memory layout now rather than carrying that fragmentation
+    # (and pandas' own PerformanceWarning about it) through every later merge
+    return df.copy()
+
+
+def add_relative_strength(df, indices_daily):
+    own = indices_daily.rename(columns={"band": "band"})
+    df = df.merge(
+        own.add_prefix("idx_own_").rename(
+            columns={"idx_own_band": "band", "idx_own_platform": "platform", "idx_own_date": "date"}
+        ),
+        on=["band", "platform", "date"], how="left",
+    )
+    overall = indices_daily[indices_daily["band"] == "100"].drop(columns=["band"])
+    df = df.merge(
+        overall.add_prefix("idx_all_").rename(columns={"idx_all_platform": "platform", "idx_all_date": "date"}),
+        on=["platform", "date"], how="left",
+    )
+    for h in HORIZONS:
+        own_col = f"idx_own_index_return_{h}d" if h != 1 else "idx_own_index_return_1d"
+        all_col = f"idx_all_index_return_{h}d" if h != 1 else "idx_all_index_return_1d"
+        ret_col = f"return_{h}d" if h != 1 else "return_1d"
+        if own_col in df.columns:
+            df[f"rel_strength_own_{h}d"] = (df[ret_col] - df[own_col]).astype("float32")
+        if all_col in df.columns:
+            df[f"rel_strength_all_{h}d"] = (df[ret_col] - df[all_col]).astype("float32")
+    return df.copy()
+
+
+def add_cross_sectional(df):
+    grp = df.groupby(["band", "platform", "date"], sort=False)
+    df["price_rank_in_band"] = grp["price"].rank(pct=True).astype("float32")
+    df["return_7d_rank_in_band"] = grp["return_7d"].rank(pct=True).astype("float32")
+    df["vol_7d_rank_in_band"] = grp["vol_7d"].rank(pct=True).astype("float32")
+    return df
+
+
+def add_cyclical(df, old_fc26_indices):
+    df["day_of_week"] = df["date"].dt.dayofweek.astype("int8")
+    df["is_weekend"] = (df["day_of_week"] >= 5)
+    season_start = df.groupby("game_version")["date"].transform("min")
+    df["days_since_season_start"] = (df["date"] - season_start).dt.days.astype("float32")
+
+    if old_fc26_indices is not None:
+        fc27_mask = df["game_version"] == "fc27"
+        lookup = old_fc26_indices.rename(columns={"day_of_season": "days_since_season_start"})
+        merged = df.loc[fc27_mask].merge(
+            lookup, on=["band", "platform", "days_since_season_start"], how="left"
+        )
+        df.loc[fc27_mask, "fc26_index_value_same_week"] = merged["fc26_index_value_same_week"].values
+        df.loc[fc27_mask, "fc26_index_return_7d_same_week"] = merged["fc26_index_return_7d_same_week"].values
+    return df
+
+
+def add_labels(df):
+    df = df.sort_values(KEYS + ["date"]).reset_index(drop=True)
+    g = df.groupby(KEYS, sort=False)["price"]
+    for h in HORIZONS:
+        fwd = g.transform(lambda s: s.shift(-h))
+        ret = (fwd - df["price"]) / df["price"]
+        df[f"label_return_{h}d"] = ret.astype("float32")
+        win = np.where(ret.isna(), np.nan, (ret > WIN_BREAKEVEN).astype(float))
+        df[f"label_win_{h}d"] = win.astype("float32")
+    return df.copy()
 
 
 def main():
-    players = pd.read_parquet(DATA_DIR / "players_features.parquet")
-    prices = pd.read_parquet(DATA_DIR / "prices_long.parquet")
-    prices = _downcast(prices)
+    DATA_DIR.mkdir(exist_ok=True)
+    blacklist = load_blacklist()
 
-    print("Building technical/momentum features...")
-    prices = build_price_features(prices, players)
-    prices = _downcast(prices)
+    log("Loading players...")
+    players = load_players()
+    log(f"  {len(players)} players, {mem_mb(players):.1f} MB")
 
-    print("Adding cross-platform features...")
-    prices = add_cross_platform(prices)
-    prices = _downcast(prices)
+    log("Loading prices...")
+    prices = load_prices(blacklist)
+    log(f"  {len(prices)} price rows, {mem_mb(prices):.1f} MB")
 
-    print("Joining index/macro context...")
-    prices = add_index_context(prices, players)
-    prices = _downcast(prices)
+    log("Building price technicals (momentum, volatility, RSI, MACD)...")
+    df = build_price_technicals(prices)
+    del prices
+    gc.collect()
+    log(f"  {len(df)} rows, {mem_mb(df):.1f} MB")
 
-    print("Computing multi-horizon forward returns (training targets)...")
-    prices = add_forward_returns(prices)
-    prices = _downcast(prices)
+    gap_rate = (df["days_since_prev_point"] > 1).mean()
+    log(f"  NOTE: {gap_rate:.1%} of rows have a >1-day gap since the previous "
+        f"price point for that player (affects how exact horizon/window math is)")
 
-    print("Adding calendar features...")
-    prices = add_calendar(prices)
+    log("Merging player metadata (rating, band, league, position, ...)...")
+    df = df.merge(players, on=["player_id", "game_version"], how="left")
+    log(f"  {len(df)} rows, {mem_mb(df):.1f} MB")
 
-    prices.to_parquet(DATA_DIR / "prices_features.parquet", index=False)
-    print(f"\nSaved prices_features.parquet: {len(prices)} rows, {len(prices.columns)} columns")
-    print("Columns:", list(prices.columns))
+    log("Loading + merging market indices (relative strength vs. rating tier)...")
+    indices_daily = load_indices_daily()
+    df = add_relative_strength(df, indices_daily)
+    del indices_daily
+    gc.collect()
+    log(f"  {len(df)} rows, {mem_mb(df):.1f} MB")
+
+    log("Loading + merging real sales history (liquidity/order-flow features)...")
+    sales_daily = load_sales_daily()
+    if sales_daily is not None:
+        df = df.merge(sales_daily, on=["player_id", "platform", "date"], how="left")
+        del sales_daily
+        gc.collect()
+    log(f"  {len(df)} rows, {mem_mb(df):.1f} MB")
+
+    log("Loading + merging live snapshots (EA-average gap, daily range)...")
+    snaps_daily = load_snapshots_daily()
+    if snaps_daily is not None:
+        df = df.merge(snaps_daily, on=["player_id", "platform", "date"], how="left")
+        del snaps_daily
+        gc.collect()
+    log(f"  {len(df)} rows, {mem_mb(df):.1f} MB")
+
+    log("Adding cross-sectional rank-within-tier features...")
+    df = add_cross_sectional(df)
+
+    log("Adding cyclical + FC26/FC27 season-alignment features...")
+    old_fc26_indices = load_old_fc26_indices()
+    df = add_cyclical(df, old_fc26_indices)
+
+    log("Computing forward-looking labels (tax-aware win flags, 6 horizons)...")
+    df = add_labels(df)
+    log(f"  final: {len(df)} rows, {len(df.columns)} columns, {mem_mb(df):.1f} MB")
+
+    log(f"Saving to {OUT_PATH}...")
+    df.to_parquet(OUT_PATH, index=False)
+    log("Done.")
+
+    log("\n=== Column summary ===")
+    with pd.option_context("display.max_rows", None):
+        print(df.dtypes)
+    log("\n=== Null rates (top 30 by null %) ===")
+    null_rates = df.isna().mean().sort_values(ascending=False)
+    print(null_rates.head(30))
 
 
 if __name__ == "__main__":
