@@ -58,6 +58,7 @@ from build_dataset import band_for
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 SCRAPES_DIR = ROOT / "scraper" / "scrapes"
+PROCESSED_DIR = SCRAPES_DIR / "processed"
 
 PLAYERS_PATH = DATA_DIR / "players.parquet"
 PRICES_LONG_PATH = DATA_DIR / "prices_long.parquet"
@@ -364,11 +365,31 @@ def merge_sales_history():
           f"{len(new_df) - (len(combined) - len(existing))} were re-scrapes of sales we already had)")
 
 
+def archive_processed_files():
+    """Move raw scrape files out of scraper/scrapes/ once they're merged in,
+    so the NEXT run's glob doesn't re-read (and re-hold-in-memory) every
+    scrape ever taken. Confirmed live via dmesg: this was silently making
+    every run more memory-hungry than the last, and is the real cause of
+    repeated OOM kills today -- one python3 process alone was killed while
+    holding nearly 12GB, on an 11GB VPS with no swap. The parquet files are
+    the durable record from here on; the raw jsonl served its purpose."""
+    PROCESSED_DIR.mkdir(exist_ok=True)
+    moved = 0
+    for pattern in ("market_list_*.jsonl", "player_history_*.jsonl", "player_sales_*.jsonl"):
+        for path in glob.glob(str(SCRAPES_DIR / pattern)):
+            p = Path(path)
+            p.rename(PROCESSED_DIR / p.name)
+            moved += 1
+    if moved:
+        print(f"[archive] moved {moved} processed scrape file(s) to {PROCESSED_DIR}")
+
+
 def main():
     DATA_DIR.mkdir(exist_ok=True)
     merge_player_history()
     merge_live_snapshots()
     merge_sales_history()
+    archive_processed_files()
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ BASE = "https://www.futbin.com"
 POPULAR_URL = f"{BASE}/27/popular"
 
 NUM_TABS = int(sys.argv[1]) if len(sys.argv) > 1 else 6
+RESTART_EVERY = int(sys.argv[2]) if len(sys.argv) > 2 else 300
 PLATFORMS = ["ps", "pc"]
 
 MAX_WAIT_SECONDS = 15
@@ -333,25 +334,44 @@ async def main():
         for platform in PLATFORMS:
             jobs.append({"player_id": pid, "slug": slug, "platform": platform})
 
-    print(f"Total jobs: {len(jobs)} ({len(all_players)} players x {len(PLATFORMS)} platforms)")
+    print(f"Total jobs: {len(jobs)} ({len(all_players)} players x {len(PLATFORMS)} platforms), "
+          f"restarting the browser every {RESTART_EVERY} jobs to bound memory growth")
 
     scraped_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     sales_path = SCRAPES_DIR / f"player_sales_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
     print(f"Writing sales data to {sales_path}")
 
     pbar = tqdm(total=len(jobs), desc="Player jobs", unit="job")
+    total_done = 0
     with open(sales_path, "w", encoding="utf-8") as sales_f:
-        results = await asyncio.gather(
-            *[worker(i, tabs[i], jobs, sales_f, scraped_at) for i in range(len(tabs))]
-        )
+        # One Chrome process was running for the ENTIRE job list before --
+        # confirmed live via dmesg: individual renderer processes were
+        # getting OOM-killed at 2-5GB each after enough navigations. Restart
+        # the whole browser every RESTART_EVERY jobs (same pattern as the
+        # FC26-era rebuild_all.py) so memory can't grow unbounded.
+        first_batch = True
+        while jobs:
+            if not first_batch:
+                browser, tabs = await launch_browser()
+            first_batch = False
+            batch = deque()
+            for _ in range(min(RESTART_EVERY, len(jobs))):
+                batch.append(jobs.popleft())
+            results = await asyncio.gather(
+                *[worker(i, tabs[i], batch, sales_f, scraped_at) for i in range(len(tabs))],
+                return_exceptions=True,
+            )
+            total_done += sum(r for r in results if isinstance(r, int))
+            try:
+                browser.stop()
+            except Exception:
+                pass
+            kill_chrome()
+            if jobs:
+                await asyncio.sleep(2)
     pbar.close()
 
-    print(f"\nDone: {sum(results)} sales pages -> {sales_path}")
-    try:
-        browser.stop()
-    except Exception:
-        pass
-    kill_chrome()
+    print(f"\nDone: {total_done} sales pages -> {sales_path}")
 
 
 if __name__ == "__main__":

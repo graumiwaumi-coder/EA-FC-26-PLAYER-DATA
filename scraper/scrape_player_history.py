@@ -48,6 +48,7 @@ BASE = "https://www.futbin.com"
 POPULAR_URL = f"{BASE}/27/popular"
 
 NUM_TABS = int(sys.argv[1]) if len(sys.argv) > 1 else 6
+RESTART_EVERY = int(sys.argv[2]) if len(sys.argv) > 2 else 300
 MAX_WAIT_SECONDS = 20
 POLL_INTERVAL = 0.5
 MIN_ARRAY_LEN = 50
@@ -405,12 +406,35 @@ async def main():
     queue = deque(players.items())
     scraped_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     out_path = SCRAPES_DIR / f"player_history_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
-    print(f"Writing to {out_path}")
+    print(f"Writing to {out_path}, restarting the browser every {RESTART_EVERY} jobs to bound memory growth")
 
     pbar = tqdm(total=len(queue), desc="Players", unit="player",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
     with open(out_path, "w", encoding="utf-8") as out_f:
-        await asyncio.gather(*[worker(i, tabs[i], queue, out_f, scraped_at) for i in range(len(tabs))])
+        # One Chrome process was running for the ENTIRE queue before --
+        # confirmed live via dmesg: individual renderer processes were
+        # getting OOM-killed at 2-5GB each after enough navigations. Restart
+        # the whole browser every RESTART_EVERY jobs (same pattern as the
+        # FC26-era rebuild_all.py) so memory can't grow unbounded.
+        first_batch = True
+        while queue:
+            if not first_batch:
+                browser, tabs = await launch_browser()
+            first_batch = False
+            batch = deque()
+            for _ in range(min(RESTART_EVERY, len(queue))):
+                batch.append(queue.popleft())
+            await asyncio.gather(
+                *[worker(i, tabs[i], batch, out_f, scraped_at) for i in range(len(tabs))],
+                return_exceptions=True,
+            )
+            try:
+                browser.stop()
+            except Exception:
+                pass
+            kill_chrome()
+            if queue:
+                await asyncio.sleep(2)
     pbar.close()
 
     print(f"\nDone: {stats['ok']} with history, {stats['no_history']} meta-only (no price-history array found), "
@@ -420,12 +444,6 @@ async def main():
               "data-pc-data/data-ps-data the way FC26 did. current_price + current_price_platform "
               "should still be usable; long-run price history will need to be built up from our own "
               "repeated scrapes over time instead.")
-
-    try:
-        browser.stop()
-    except Exception:
-        pass
-    kill_chrome()
 
 
 if __name__ == "__main__":
