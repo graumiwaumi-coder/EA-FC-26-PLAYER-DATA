@@ -208,7 +208,7 @@ def evaluate_regressor(model, X_test, y_test):
     return {"mae": mae, "directional_accuracy": directional_acc, "n_test": int(valid.sum())}
 
 
-def train_horizon(df, feature_cols, cat_cols, horizon, weights):
+def train_horizon(df, feature_cols, cat_cols, horizon, weights, is_pc):
     win_col = f"label_win_{horizon}d"
     ret_col = f"label_return_{horizon}d"
     X_all = df[feature_cols]
@@ -224,7 +224,13 @@ def train_horizon(df, feature_cols, cat_cols, horizon, weights):
         clf = lgb.LGBMClassifier(objective="binary", **LGB_PARAMS)
         clf.fit(X_all[win_train_mask], y_win[win_train_mask],
                 sample_weight=weights[win_train_mask], categorical_feature=cat_cols)
-        res = evaluate_classifier(clf, X_all[test_mask], y_win[test_mask], y_ret[test_mask])
+        # Trained on BOTH platforms (console data is a real, useful signal --
+        # see the cross-platform lead-lag features), but graded ONLY on PC
+        # rows -- the person trading this only trades on PC, so a walk-forward
+        # "win rate" that secretly includes console outcomes would overstate
+        # or understate what they'd actually experience.
+        pc_test_mask = test_mask & is_pc
+        res = evaluate_classifier(clf, X_all[pc_test_mask], y_win[pc_test_mask], y_ret[pc_test_mask])
         if res:
             fold_clf_results.append(res)
 
@@ -241,7 +247,7 @@ def train_horizon(df, feature_cols, cat_cols, horizon, weights):
         reg = lgb.LGBMRegressor(objective="regression", **LGB_PARAMS)
         reg.fit(X_all[ret_train_mask], y_ret[ret_train_mask],
                 sample_weight=weights[ret_train_mask], categorical_feature=cat_cols)
-        ret_test_mask = test_mask & (y_win == 1)
+        ret_test_mask = pc_test_mask & (y_win == 1)
         res_r = evaluate_regressor(reg, X_all[ret_test_mask], y_ret[ret_test_mask])
         if res_r:
             fold_reg_results.append(res_r)
@@ -271,6 +277,13 @@ def main():
     log(f"{len(feature_cols)} feature columns ({len(cat_cols)} categorical: {cat_cols})")
 
     weights = sample_weights(df)
+    # Trained on console + PC together (console is a real leading-indicator
+    # signal, not just noise -- see the cross-platform features), but every
+    # walk-forward success metric is graded on PC rows only, since PC is the
+    # only market actually being traded.
+    is_pc = (df["platform"].astype(str) == "pc").to_numpy()
+    log(f"Evaluation scope: {is_pc.sum()} of {len(df)} rows are PC (graded on these only; "
+        f"console rows still used for training)")
 
     version = time.strftime("%Y%m%d_%H%M%S")
     version_dir = MODELS_DIR / version
@@ -279,7 +292,7 @@ def main():
     all_summaries = []
     for h in HORIZONS:
         log(f"\n=== Training horizon {h}d ===")
-        clf, reg, summary = train_horizon(df, feature_cols, cat_cols, h, weights)
+        clf, reg, summary = train_horizon(df, feature_cols, cat_cols, h, weights, is_pc)
         clf.booster_.save_model(str(version_dir / f"clf_{h}d.txt"))
         reg.booster_.save_model(str(version_dir / f"reg_{h}d.txt"))
         all_summaries.append(summary)
@@ -287,7 +300,9 @@ def main():
     meta = {
         "version": version, "feature_cols": feature_cols, "categorical_cols": cat_cols,
         "horizons": HORIZONS, "min_rating": MIN_RATING, "fc27_sample_weight": FC27_SAMPLE_WEIGHT,
-        "n_rows_trained": len(df), "summaries": all_summaries,
+        "n_rows_trained": len(df), "n_pc_rows_trained": int(is_pc.sum()),
+        "eval_scope": "pc_only (trained on console+pc combined; all fold metrics are PC-only)",
+        "summaries": all_summaries,
     }
     (version_dir / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
 
