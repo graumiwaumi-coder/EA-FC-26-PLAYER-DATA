@@ -37,6 +37,7 @@ Writes: data/feature_panel.parquet
 """
 import gc
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -76,6 +77,45 @@ def load_blacklist():
     return {(r["player_id"], r["game_version"]) for r in records}
 
 
+PROMO_FAMILY_RULES = [
+    # order matters -- more specific patterns first. Confirmed live against
+    # the real FC26 squad values (826 unique raw strings): promo campaigns
+    # follow predictable patterns (trailing week/wave numbers, league-name
+    # prefixes, gender/tier suffixes) that a rule-based normalizer can pool
+    # safely, unlike naive fuzzy string-distance matching -- "TOTW" and
+    # "TOTS" are one character apart but are completely different promos,
+    # so edit-distance matching would be actively dangerous here.
+    (r"toty", "TOTY"),  # TOTY, TOTYIcons, TOTYWomen, "TOTY Honourable" -- 4
+                        # spellings of one promo found in FC26 alone
+    (r"tots", "TOTS"),  # UltimateTOTSmale/female, {League}TOTS, RestOf*TOTS
+    (r"^totw\d*$", "TOTW"),  # TOTW1..TOTW32 -> one pooled family
+    (r"futbirthday", "FUTBirthday"),
+    (r"fantasyfc", "FantasyFC"),
+    (r"futurestars", "FutureStars"),
+    (r"winterwildcards", "WinterWildcards"),
+    (r"summerstars", "SummerStars"),
+    (r"^(ucl|uel|uwcl|uecl).*(winner|rttf|rttk|primetime)", "ChampionsPath"),
+    (r"^(hero)$", "Heroes"),
+    (r"^ea fc icons$", "Icons"),
+]
+
+
+def normalize_promo_family(squad):
+    """Maps a raw squad string to a pooled promo family (e.g. TOTW1..TOTW32
+    -> 'TOTW') so the model can learn from ALL of a promo type's cards
+    together instead of ~23 near-invisible individual categories. Returns
+    None for anything that doesn't match a known promo pattern (almost
+    always a real club name), which correctly leaves it out of this
+    feature rather than mis-pooling it with something unrelated."""
+    if not squad:
+        return None
+    low = str(squad).strip().lower()
+    for pattern, family in PROMO_FAMILY_RULES:
+        if re.search(pattern, low):
+            return family
+    return None
+
+
 def load_players():
     df = pd.read_parquet(DATA_DIR / "players.parquet")
     keep = ["id", "game_version", "rating", "position", "nation", "league", "club",
@@ -86,7 +126,9 @@ def load_players():
     for c in ["rating", "skills", "weak_foot", "height_cm", "age"]:
         df[c] = df[c].astype("float32")
     df["n_playstyles"] = df["n_playstyles"].astype("float32")
-    for c in ["position", "nation", "league", "club", "squad", "foot", "body_type", "band", "game_version"]:
+    df["promo_family"] = df["squad"].map(normalize_promo_family)
+    for c in ["position", "nation", "league", "club", "squad", "foot", "body_type", "band",
+              "game_version", "promo_family"]:
         df[c] = df[c].astype("category")
     df["is_icon"] = (df["league"].astype(str) == "Icons") | (df["band"].astype(str) == "icons")
     return df
@@ -425,6 +467,17 @@ def add_cross_sectional(df):
     df["price_rank_in_band"] = grp["price"].rank(pct=True).astype("float32")
     df["return_7d_rank_in_band"] = grp["return_7d"].rank(pct=True).astype("float32")
     df["vol_7d_rank_in_band"] = grp["vol_7d"].rank(pct=True).astype("float32")
+
+    # same idea, but "how is this card doing against other cards of the SAME
+    # promo type released around the same time" -- e.g. a TOTW card ranked
+    # against other TOTW cards, not against the whole market. Only rows with
+    # a real promo_family get a value; base gold cards correctly get NaN here
+    # (they have their own band-relative ranks above instead)
+    has_promo = df["promo_family"].notna()
+    if has_promo.any():
+        promo_grp = df[has_promo].groupby(["promo_family", "platform", "date"], sort=False)
+        df.loc[has_promo, "price_rank_in_promo"] = promo_grp["price"].rank(pct=True).astype("float32")
+        df.loc[has_promo, "return_7d_rank_in_promo"] = promo_grp["return_7d"].rank(pct=True).astype("float32")
     return df
 
 
@@ -433,6 +486,24 @@ def add_cyclical(df, old_fc26_indices):
     df["is_weekend"] = (df["day_of_week"] >= 5)
     season_start = df.groupby("game_version")["date"].transform("min")
     df["days_since_season_start"] = (df["date"] - season_start).dt.days.astype("float32")
+
+    # days_since_season_start alone is risky to lean on: FC26 has ~370 days
+    # of history and FC27 only a handful so far, so a raw day-count doesn't
+    # mean the same thing in both -- a model that learns "high day-count =
+    # crash" from FC26's season winding down has no way to know whether that
+    # applies to FC27, which hasn't gotten anywhere near that range yet.
+    # Express progress as a fraction of FC26's own COMPLETE, known season
+    # length instead (a fixed reference, not each game's own still-growing
+    # max, which would trivially read ~100% for whatever the latest scraped
+    # row happens to be) so "early in the season" reads the same way for
+    # both games rather than as an incomparable raw number.
+    fc26_mask = df["game_version"] == "fc26"
+    if fc26_mask.any():
+        fc26_span_days = (df.loc[fc26_mask, "date"].max() - df.loc[fc26_mask, "date"].min()).days
+    else:
+        fc26_span_days = 365
+    fc26_span_days = max(fc26_span_days, 1)
+    df["season_progress_frac"] = (df["days_since_season_start"] / fc26_span_days).astype("float32")
 
     if old_fc26_indices is not None:
         fc27_mask = df["game_version"] == "fc27"

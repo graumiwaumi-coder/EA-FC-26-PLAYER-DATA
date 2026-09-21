@@ -130,17 +130,29 @@ def prepare_features(df, feature_cols):
     return df, cat_cols
 
 
-def walk_forward_splits(dates, n_splits=N_SPLITS, test_days=TEST_DAYS,
+def walk_forward_splits(dates, horizon, n_splits=N_SPLITS, test_days=TEST_DAYS,
                          embargo_days=EMBARGO_DAYS, min_train_days=MIN_TRAIN_DAYS):
     """Rolling-window folds, walking backward from the most recent data.
     Each fold's test window is preceded by an embargo gap so a label's
     forward-looking span (up to `embargo_days`) can never leak across the
     train/test boundary. Returns (train_mask, test_mask) numpy boolean
-    array pairs, oldest fold first."""
+    array pairs, oldest fold first.
+
+    Confirmed live: without the `horizon` adjustment below, the LAST fold at
+    long horizons (21d, 30d) was mostly or entirely unusable -- a test row
+    dated within `horizon` days of the most recent data we have literally
+    cannot have a valid label yet (there's no future price to check it
+    against), so that fold's test window was largely wasted on unlabelable
+    rows. 30d's last fold had fewer than 10 valid rows and got silently
+    dropped; 21d's had ~43K (thin enough that its AUC of 0.43 was likely
+    noise/an artifact of the thin, date-narrow sample rather than a real
+    signal). Capping the latest possible test_end at
+    (max_date - horizon days) keeps every fold's test window inside the
+    region that can actually be labeled."""
     dates = pd.to_datetime(dates)
     min_date, max_date = dates.min(), dates.max()
     folds = []
-    test_end = max_date
+    test_end = max_date - pd.Timedelta(days=horizon)
     for _ in range(n_splits):
         test_start = test_end - pd.Timedelta(days=test_days)
         train_end = test_start - pd.Timedelta(days=embargo_days)
@@ -180,6 +192,11 @@ def evaluate_classifier(model, X_test, y_test, returns_test):
 
 
 def evaluate_regressor(model, X_test, y_test):
+    """Called with rows already restricted to actual wins (see
+    train_horizon), so y_test is always positive here -- directional_accuracy
+    now checks whether the model correctly predicts a positive move rather
+    than underpredicting into negative territory, not "up vs down" in
+    general (that question belongs to the classifier)."""
     if len(X_test) == 0:
         return None
     valid = ~np.isnan(y_test)
@@ -198,7 +215,7 @@ def train_horizon(df, feature_cols, cat_cols, horizon, weights):
     y_win = df[win_col].to_numpy()
     y_ret = df[ret_col].to_numpy()
 
-    folds = walk_forward_splits(df["date"])
+    folds = walk_forward_splits(df["date"], horizon)
     log(f"  {len(folds)} walk-forward folds for horizon={horizon}d")
 
     fold_clf_results, fold_reg_results = [], []
@@ -211,11 +228,21 @@ def train_horizon(df, feature_cols, cat_cols, horizon, weights):
         if res:
             fold_clf_results.append(res)
 
-        ret_train_mask = train_mask & ~np.isnan(y_ret)
+        # Regressor trains (and is evaluated) ONLY on rows that were actual
+        # confirmed wins, not on the full mix of wins/losses/flat moves.
+        # Confirmed live: FUT price moves are heavily skewed (most cards
+        # drift flat-to-down, a few spike hard), so a regressor fit on
+        # everything gets pulled toward the skewed mean and ends up guessing
+        # the wrong sign more often than not (38-45% directional accuracy,
+        # worse than a coin flip). Restricting it to "given this IS a real
+        # winner, how big is the move" is a different, better-posed question
+        # -- the classifier above already answers "is this a winner at all."
+        ret_train_mask = train_mask & (y_win == 1)
         reg = lgb.LGBMRegressor(objective="regression", **LGB_PARAMS)
         reg.fit(X_all[ret_train_mask], y_ret[ret_train_mask],
                 sample_weight=weights[ret_train_mask], categorical_feature=cat_cols)
-        res_r = evaluate_regressor(reg, X_all[test_mask], y_ret[test_mask])
+        ret_test_mask = test_mask & (y_win == 1)
+        res_r = evaluate_regressor(reg, X_all[ret_test_mask], y_ret[ret_test_mask])
         if res_r:
             fold_reg_results.append(res_r)
         log(f"    fold {i + 1}/{len(folds)}: clf={res}, reg={res_r}")
@@ -228,7 +255,7 @@ def train_horizon(df, feature_cols, cat_cols, horizon, weights):
     final_clf.fit(X_all[final_win_mask], y_win[final_win_mask],
                   sample_weight=weights[final_win_mask], categorical_feature=cat_cols)
 
-    final_ret_mask = ~np.isnan(y_ret)
+    final_ret_mask = y_win == 1
     final_reg = lgb.LGBMRegressor(objective="regression", **LGB_PARAMS)
     final_reg.fit(X_all[final_ret_mask], y_ret[final_ret_mask],
                   sample_weight=weights[final_ret_mask], categorical_feature=cat_cols)
