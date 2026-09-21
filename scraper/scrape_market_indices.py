@@ -1,11 +1,35 @@
 #!/usr/bin/env python3
 """
-Scrape futbin's FC27 Market Index data (Daily view) for both Console and PC,
-across rating tiers plus Icons -- the FC27 equivalent of the FC26-era
-scrape_indices.py. These are futbin's own published rating-tier indices
-(e.g. "the 84-rated card index"), used as a market benchmark: a card quietly
-beating its own tier's index over time is a stronger signal than one just
-drifting up with the whole market.
+Scrape futbin's FC27 Market Index pages for both Console (ps) and PC, across
+rating tiers 81-86 plus Icons and the main "100" index. These are futbin's
+own published rating-tier indices (e.g. "the 84-rated card index"), used as
+a market benchmark: a card quietly beating its own tier's index over time is
+a stronger signal than one just drifting up with the whole market.
+
+Confirmed live via DevTools inspection (2026-09-21) on /27/market/84:
+
+  - The chart's raw time-series is embedded directly in the DOM as JSON,
+    no chart-library introspection or UI clicking needed:
+      div.market-graph-platform-ps[data-graph-data]  -> "[[ts_ms, value], ...]"
+      div.market-graph-platform-pc[data-graph-data]  -> same, for PC
+    Both platforms' elements are present in the same page load (one visible,
+    one hidden) -- same "both platforms in one page load" pattern already
+    confirmed on the market-list page, so no platform-toggle clicking is
+    needed here either.
+  - Open/Lowest/Highest summary figures sit in similarly platform-suffixed
+    blocks: div.market-main-index-summary...platform-ps-only /
+    ...platform-pc-only.
+  - Top Gainers / Top Losers (site-wide, not tier-specific -- ratings mix
+    on every tier page) link to individual players: a[href^="/27/player/"].
+  - Each tier page also has a "Top Index {N} Movers" sidebar list, tier-
+    specific, via a.xl-row links.
+  - A "Market Momentum" card gives a single site-wide score + label.
+
+Player links found in Top Gainers/Losers/Movers are written to their own
+output stream so scrape_player_history.py and scrape_player_details.py can
+pull them into the main player universe -- these are exactly the kind of
+players (recently moving fast) worth having full price/sales history for,
+even if a market-list price bucket didn't happen to catch them.
 
 Unlike the FC26 version (a one-time historical pull that overwrote a single
 file), this writes a fresh timestamped snapshot every run, the same pattern
@@ -14,15 +38,16 @@ also rolling/limited, so our own accumulated snapshots are what preserve
 the full picture over time.
 
 Every page-navigation and page-read call is bounded with a timeout and
-wrapped in error handling from the start, and the cookie-consent banner is
-dismissed automatically -- lessons learned the hard way building the other
-three scrapers today, applied here up front instead of discovered live.
+wrapped in error handling, and the cookie-consent banner is dismissed
+automatically -- lessons learned the hard way building the other three
+scrapers, applied here from the start instead of discovered live.
 
 Run: xvfb-run python3 scrape_market_indices.py
 Requires: pip install nodriver tqdm
 """
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -36,8 +61,8 @@ SCRAPES_DIR.mkdir(exist_ok=True)
 
 BASE = "https://www.futbin.com"
 
-# Same rating tiers futbin published for FC26 -- unconfirmed whether FC27's
-# market page exposes exactly the same set until this runs live.
+# Same rating tiers futbin published for FC26 -- confirmed 84 works live;
+# the rest are assumed consistent (same site, same UI) until this runs.
 INDICES = {
     "100": "100",
     "86": "86",
@@ -48,11 +73,11 @@ INDICES = {
     "81": "81",
     "icons": "Icons",
 }
-PLATFORMS = ["console", "pc"]
 
 GET_PAGE_TIMEOUT = 25
 EVALUATE_TIMEOUT = 10
-MAX_WAIT_SECONDS = 25
+MAX_WAIT_SECONDS = 20
+POLL_INTERVAL = 0.5
 
 BLOCKED = [
     "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg",
@@ -61,6 +86,64 @@ BLOCKED = [
     "*facebook.net*", "*hotjar*", "*segment.io*", "*adsystem*",
     "*adnxs*", "*taboola*", "*outbrain*", "*criteo*", "*amazon-adsystem*",
 ]
+
+EXTRACT_JS = r"""
+(() => {
+    function readGraph(suffix) {
+        const el = document.querySelector(`.market-graph-platform-${suffix}[data-graph-data]`);
+        if (!el) return null;
+        try {
+            return JSON.parse(el.getAttribute('data-graph-data'));
+        } catch (e) { return null; }
+    }
+
+    function readSummary(suffix) {
+        const el = document.querySelector(`.market-main-index-summary.platform-${suffix}-only`);
+        return el ? el.innerText.replace(/\s+/g, ' ').trim() : null;
+    }
+
+    function sectionLinks(headingText) {
+        const heading = Array.from(document.querySelectorAll('div,h2,h3,span'))
+            .find(el => el.children.length === 0 && el.textContent.trim() === headingText);
+        if (!heading) return [];
+        let container = heading.parentElement;
+        for (let i = 0; i < 5 && container; i++) {
+            const links = container.querySelectorAll('a[href^="/27/player/"]');
+            if (links.length > 0) return Array.from(links);
+            container = container.parentElement;
+        }
+        return [];
+    }
+
+    function cardInfo(link) {
+        let el = link;
+        for (let i = 0; i < 3 && el.parentElement; i++) el = el.parentElement;
+        return {
+            href: link.getAttribute('href'),
+            text: el.innerText.replace(/\s+/g, ' ').trim().slice(0, 300),
+        };
+    }
+
+    const gainers = sectionLinks('Top Gainers').map(cardInfo);
+    const losers = sectionLinks('Top Losers').map(cardInfo);
+    const movers = Array.from(document.querySelectorAll('a.xl-row[href^="/27/player/"]')).map(cardInfo);
+
+    const momentumEl = Array.from(document.querySelectorAll('div,section'))
+        .find(el => el.textContent.includes('MARKET MOMENTUM') || el.textContent.includes('Market Momentum'));
+    const momentum_text = momentumEl ? momentumEl.innerText.replace(/\s+/g, ' ').trim().slice(0, 200) : null;
+
+    return JSON.stringify({
+        graph_ps: readGraph('ps'),
+        graph_pc: readGraph('pc'),
+        summary_ps: readSummary('ps'),
+        summary_pc: readSummary('pc'),
+        gainers: gainers,
+        losers: losers,
+        movers: movers,
+        momentum_text: momentum_text,
+    });
+})()
+"""
 
 
 def kill_chrome():
@@ -106,132 +189,71 @@ async def get_page(tab, url):
     await dismiss_cookie_banner(tab)
 
 
-async def click_daily(tab):
-    """Robustly clicks the Daily radio input inside its label."""
-    return await evaluate_bounded(tab, """
-    (() => {
-        const labels = Array.from(document.querySelectorAll('label'));
-        const dailyLabel = labels.find(l => l.textContent.trim().includes('Daily'));
-        if (!dailyLabel) return "label_not_found";
-
-        const radioInput = dailyLabel.querySelector('input[type="radio"]');
-        if (radioInput && radioInput.checked) return "already_active";
-
-        if (radioInput) {
-            radioInput.click();
-            return "clicked_radio";
-        } else {
-            dailyLabel.click();
-            return "clicked_label";
-        }
-    })()
-    """, default="timed_out")
-
-
-async def click_platform(tab, platform):
-    """Robustly clicks the Console/PC toggle."""
-    return await evaluate_bounded(tab, f"""
-    (() => {{
-        const elements = Array.from(document.querySelectorAll('button, div[role="button"], span, a, label'));
-        const btn = elements.find(el => el.textContent.trim().toLowerCase() === "{platform}" && el.offsetParent !== null);
-
-        if (!btn) return "not_found";
-
-        const isActive = btn.classList.contains('active') ||
-                         (btn.parentElement && btn.parentElement.classList.contains('active')) ||
-                         (btn.style.backgroundColor && btn.style.backgroundColor !== 'transparent' && btn.style.backgroundColor !== 'rgba(0, 0, 0, 0)');
-
-        if (isActive) return "already_active";
-
-        btn.click();
-        return "clicked";
-    }})()
-    """, default="timed_out")
-
-
-async def get_highcharts_data(tab):
-    """Extracts the raw data array from the *visible* Highcharts instance."""
-    raw = await evaluate_bounded(tab, """
-    (() => {
-        if (!window.Highcharts || !window.Highcharts.charts) {
-            return JSON.stringify({ error: "Highcharts not found" });
-        }
-
-        let visibleChart = null;
-        window.Highcharts.charts.forEach(chart => {
-            if (chart && chart.renderTo && chart.renderTo.offsetParent !== null) {
-                visibleChart = chart;
-            }
-        });
-
-        if (!visibleChart) return JSON.stringify({ error: "No visible chart found" });
-
-        let series = visibleChart.series[0];
-        if (!series) return JSON.stringify({ error: "No series found" });
-
-        let data = null;
-
-        if (series.points && series.points.length > 0) {
-            data = series.points.map(p => [p.x, p.y]);
-        } else if (series.options && series.options.data) {
-            data = series.options.data.map(pt => Array.isArray(pt) ? pt : [pt.x, pt.y]);
-        }
-
-        if (!data || data.length === 0) return JSON.stringify({ error: "No data points found" });
-
-        return JSON.stringify({ count: data.length, data: data });
-    })()
-    """, default=None)
-    if raw is None:
+def parse_money(s):
+    if s is None:
         return None
+    s = str(s).strip().upper().replace(",", "")
+    mult = 1
+    if s.endswith("K"):
+        mult, s = 1_000, s[:-1]
+    elif s.endswith("M"):
+        mult, s = 1_000_000, s[:-1]
     try:
-        return json.loads(raw)
-    except Exception:
+        return float(s) * mult
+    except ValueError:
         return None
 
 
-async def extract_index_data(tab, index_name, platform):
+def parse_card(card):
+    """card = {"href": "/27/player/123/slug", "text": "<raw card blob>"}.
+    Pulls out whatever we reasonably can from the blob without assuming an
+    exact layout -- unconfirmed live, so kept defensive."""
+    m = re.search(r"/27/player/(\d+)/([^/?]+)", card.get("href") or "")
+    player_id, slug = (int(m.group(1)), m.group(2)) if m else (None, None)
+    text = card.get("text") or ""
+    rating_m = re.search(r"\b(\d{2})\b", text)
+    price_m = re.search(r"\b(\d[\d,.]*[KM]?)\b(?!%)", text)
+    pct_m = re.search(r"([+-]?\d[\d.]*)%", text)
+    return {
+        "player_id": player_id,
+        "slug": slug,
+        "rating": int(rating_m.group(1)) if rating_m else None,
+        "price": parse_money(price_m.group(1)) if price_m else None,
+        "pct_change": float(pct_m.group(1)) if pct_m else None,
+        "raw_text": text,
+    }
+
+
+async def extract_index_page(tab, index_name):
     slug = INDICES.get(index_name, index_name)
     url = f"{BASE}/27/market/{slug}" if index_name != "100" else f"{BASE}/27/market"
 
-    print(f"[{platform.upper()}] Loading Index {index_name}...")
+    print(f"Loading Index {index_name}...")
     await get_page(tab, url)
-    await asyncio.sleep(5)
 
-    platform_status = await click_platform(tab, platform)
-    print(f"  [UI] Platform toggle status: {platform_status}")
-    if platform_status == "clicked":
-        await asyncio.sleep(3)
-
-    daily_status = await click_daily(tab)
-    print(f"  [UI] Daily toggle status: {daily_status}")
-
-    if daily_status not in ["clicked_radio", "clicked_label", "already_active"]:
-        print("  [ERROR] Could not click Daily toggle. Extraction will fail.")
-        return None
-
-    print("  [UI] Waiting for Highcharts to redraw to Daily view...")
-    data_res = None
-    for attempt in range(10):
-        await asyncio.sleep(2)
-        data_res = await get_highcharts_data(tab)
-
-        if data_res and data_res.get("count", 0) < 1000:
-            print(f"  [Success] Daily data loaded ({data_res['count']} points).")
+    elapsed = 0.0
+    result = None
+    while elapsed < MAX_WAIT_SECONDS:
+        raw = await evaluate_bounded(tab, EXTRACT_JS, default=None)
+        try:
+            result = json.loads(raw) if raw else None
+        except Exception:
+            result = None
+        if result and (result.get("graph_ps") or result.get("graph_pc")):
             break
-        elif data_res:
-            print(f"  [Wait] Still seeing {data_res['count']} points (Live view). Retrying...")
+        await asyncio.sleep(POLL_INTERVAL)
+        elapsed += POLL_INTERVAL
 
-    if not data_res or data_res.get("count", 0) >= 1000:
-        print("  [ERROR] Failed to load Daily data. It might be stuck on Live view.")
+    if not result or not (result.get("graph_ps") or result.get("graph_pc")):
+        print(f"  ERROR: no graph data found for index {index_name} after {MAX_WAIT_SECONDS}s")
         return None
 
-    return {
-        "index": index_name,
-        "platform": platform,
-        "source": "Highcharts",
-        "data": data_res["data"],
-    }
+    n_ps = len(result.get("graph_ps") or [])
+    n_pc = len(result.get("graph_pc") or [])
+    print(f"  OK: ps={n_ps} points, pc={n_pc} points, "
+          f"{len(result.get('gainers') or [])} gainers, {len(result.get('losers') or [])} losers, "
+          f"{len(result.get('movers') or [])} tier movers")
+    return result
 
 
 async def launch_browser():
@@ -246,35 +268,78 @@ async def launch_browser():
 
 async def main():
     out_path = SCRAPES_DIR / f"market_indices_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+    players_path = SCRAPES_DIR / f"index_players_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
     out_f = open(out_path, "w", encoding="utf-8")
+    players_f = open(players_path, "w", encoding="utf-8")
 
     browser, tab = await launch_browser()
-    print(f"Writing to {out_path}")
+    print(f"Writing index data to {out_path}")
+    print(f"Writing discovered players to {players_path}")
 
     scraped_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     ok, err = 0, 0
-    for index_name in INDICES.keys():
-        for platform in PLATFORMS:
-            try:
-                data = await extract_index_data(tab, index_name, platform)
-                if data and data.get("data"):
-                    data["scraped_at"] = scraped_at
-                    out_f.write(json.dumps(data) + "\n")
-                    out_f.flush()
-                    points = len(data["data"])
-                    print(f"OK: Index {index_name} ({platform}) - {points} points\n")
-                    ok += 1
-                else:
-                    print(f"FAILED: Index {index_name} ({platform})\n")
-                    err += 1
-            except Exception as e:
-                print(f"ERROR on Index {index_name} ({platform}): {str(e)[:80]}\n")
-                err += 1
+    seen_player_ids = set()
 
-            await asyncio.sleep(2)
+    for index_name in INDICES.keys():
+        try:
+            result = await extract_index_page(tab, index_name)
+            if not result:
+                err += 1
+                await asyncio.sleep(2)
+                continue
+
+            for platform, key in (("ps", "graph_ps"), ("pc", "graph_pc")):
+                points = result.get(key)
+                if points:
+                    out_f.write(json.dumps({
+                        "index": index_name, "platform": platform,
+                        "data": points, "scraped_at": scraped_at,
+                    }) + "\n")
+
+            for platform, key in (("ps", "summary_ps"), ("pc", "summary_pc")):
+                summary = result.get(key)
+                if summary:
+                    out_f.write(json.dumps({
+                        "index": index_name, "platform": platform,
+                        "summary_text": summary, "scraped_at": scraped_at,
+                    }) + "\n")
+            out_f.flush()
+
+            for section, cards in (("gainer", result.get("gainers") or []),
+                                    ("loser", result.get("losers") or []),
+                                    (f"tier_{index_name}_mover", result.get("movers") or [])):
+                for card in cards:
+                    parsed = parse_card(card)
+                    if parsed["player_id"] is None:
+                        continue
+                    players_f.write(json.dumps({
+                        "player_id": parsed["player_id"], "slug": parsed["slug"],
+                        "rating": parsed["rating"], "price": parsed["price"],
+                        "pct_change": parsed["pct_change"], "section": section,
+                        "index": index_name, "scraped_at": scraped_at,
+                    }) + "\n")
+                    seen_player_ids.add(parsed["player_id"])
+            players_f.flush()
+
+            momentum = result.get("momentum_text")
+            if momentum:
+                out_f.write(json.dumps({
+                    "index": index_name, "platform": None,
+                    "momentum_text": momentum, "scraped_at": scraped_at,
+                }) + "\n")
+                out_f.flush()
+
+            ok += 1
+        except Exception as e:
+            print(f"ERROR on Index {index_name}: {str(e)[:80]}")
+            err += 1
+
+        await asyncio.sleep(2)
 
     out_f.close()
-    print(f"\nDone: {ok} ok, {err} failed -> {out_path}")
+    players_f.close()
+    print(f"\nDone: {ok} index pages ok, {err} failed, "
+          f"{len(seen_player_ids)} unique players discovered -> {out_path}, {players_path}")
     try:
         browser.stop()
     except Exception:

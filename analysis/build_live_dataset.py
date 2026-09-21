@@ -429,7 +429,7 @@ def archive_processed_files():
     PROCESSED_DIR.mkdir(exist_ok=True)
     moved = 0
     for pattern in ("market_list_*.jsonl", "player_history_*.jsonl", "player_sales_*.jsonl",
-                     "market_indices_*.jsonl"):
+                     "market_indices_*.jsonl", "index_players_*.jsonl"):
         for path in glob.glob(str(SCRAPES_DIR / pattern)):
             p = Path(path)
             p.rename(PROCESSED_DIR / p.name)

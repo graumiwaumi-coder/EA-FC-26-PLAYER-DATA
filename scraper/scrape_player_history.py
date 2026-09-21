@@ -279,6 +279,31 @@ def latest_market_list_file():
     return files[-1] if files else None
 
 
+def load_index_movers():
+    """Players discovered as Top Gainers/Losers/tier-movers on the market
+    index pages (scrape_market_indices.py) -- worth a full scrape even if a
+    market-list price bucket didn't happen to catch them, since a player
+    moving fast enough to show up here is exactly the kind of card this
+    whole system cares about."""
+    players = {}
+    files = sorted(glob.glob(str(SCRAPES_DIR / "index_players_*.jsonl")))
+    if not files:
+        return players
+    path = files[-1]
+    print(f"Loading players from {path}")
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            pid, slug = r.get("player_id"), r.get("slug")
+            if pid is not None and slug:
+                players[pid] = slug
+    print(f"  {len(players)} unique players from index movers")
+    return players
+
+
 def load_player_universe():
     players = {}
     path = latest_market_list_file()
@@ -391,6 +416,7 @@ async def main():
     print(f"Launched {len(tabs)} tabs")
 
     players = load_player_universe()
+    players.update(load_index_movers())
     try:
         popular = await scrape_popular_list(tabs[0])
         players.update(popular)
