@@ -1,0 +1,43 @@
+Data quality report -- generated 2026-09-21T10:34:20.736857+00:00
+
+=== players.parquet ===
+  total rows: 30417
+  by game_version: {'fc26': 28481, 'fc27': 1936}
+  rows with MISSING game_version (should be 0 -- risk of FC26/FC27 id collision): 0
+  rating null rate: 1.0%
+  rows with rating < 75 (out of Gold+ scope, should be rare/0): 21891
+  FC27 rows with current_price populated: 1602/1936
+
+=== prices_long.parquet ===
+  total rows: 16829572
+  by game_version: {'fc26': 16813112, 'fc27': 16460}
+  duplicate rows on ['player_id', 'platform', 'date', 'game_version'] (should be 0 -- dedup key): 0
+  date range: 2025-09-18 00:00:00 to 2026-09-20 00:00:00
+  rows with implausible price (<=0 or >20M, should be rare/0): 2011766
+
+=== live_snapshots.parquet ===
+  total rows: 30093
+  by source: {'price_range': 19702, 'sales_page_chart': 9965, 'squad': 426}
+  date range: 2026-09-19 21:14:02 to 2026-09-21 12:12:01
+
+=== sales_history.parquet ===
+  total rows: 770865
+  rows with missing sold_for: 306
+  duplicate rows on sale content (should be 0 -- dedup key): 0
+
+=== market_indices.parquet ===
+  total rows: 46460
+  by index_tier: {'86': 5814, '85': 5810, '84': 5810, '83': 5810, '82': 5808, '81': 5808, 'icons': 5808, '100': 5792}
+  by platform: {'ps': 23230, 'pc': 23230}
+  duplicate rows on ['index_tier', 'platform', 'date'] (should be 0 -- dedup key): 0
+  date range: 2026-09-19 09:31:15 to 2026-09-21 09:57:16
+  rows with implausible index value (<=0 or >100k, should be rare/0): 0
+
+=== index_players_*.jsonl (latest raw file -- player-discovery stream) ===
+  file: /root/EA-FC-26-PLAYER-DATA/scraper/scrapes/processed/index_players_20260921_115750.jsonl
+  total rows: 1710
+  unique player_id: 389
+  by section: {'gainer': 701, 'loser': 700, 'tier_100_mover': 80, 'tier_85_mover': 40, 'tier_82_mover': 40, 'tier_81_mover': 40, 'tier_icons_mover': 40, 'tier_84_mover': 36, 'tier_86_mover': 33}
+  rating: 309 null, 0 outside 75-99 (should be 0 after the plausibility filter)
+  price non-null (should be 0 -- intentionally dropped as unreliable): 0
+  pct_change null rate: 0.0%
