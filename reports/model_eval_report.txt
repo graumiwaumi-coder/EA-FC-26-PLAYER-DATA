@@ -1,180 +1,184 @@
 === Run summary ===
-version: 20260921_155651
+version: 20260921_173049
 n_rows_trained: 3195350
-n_feature_cols: 109
-categorical_cols: ['platform', 'game_version', 'position', 'nation', 'league', 'club', 'squad', 'foot', 'body_type', 'band']
+n_pc_rows_trained: 1597675
+eval_scope: pc_only (trained on console+pc combined; all fold metrics are PC-only)
+n_feature_cols: 113
+categorical_cols: ['platform', 'game_version', 'position', 'nation', 'league', 'club', 'squad', 'foot', 'body_type', 'band', 'promo_family']
 
 === Horizon 1d (4 folds) ===
 classifier folds:
-  {'auc': 0.7853689819273496, 'n_test': 301318, 'n_picks': 25907, 'win_rate_of_picks': 0.48650944232940674, 'avg_return_of_picks': 0.16311334073543549}
-  {'auc': 0.7920373513500889, 'n_test': 312920, 'n_picks': 10554, 'win_rate_of_picks': 0.5759901404380798, 'avg_return_of_picks': 0.25373315811157227}
-  {'auc': 0.754675983819625, 'n_test': 333367, 'n_picks': 15898, 'win_rate_of_picks': 0.5837212204933167, 'avg_return_of_picks': 0.3136030435562134}
-  {'auc': 0.7587942351964446, 'n_test': 275218, 'n_picks': 15169, 'win_rate_of_picks': 0.617641270160675, 'avg_return_of_picks': 0.5475700497627258}
+  {'auc': 0.7908351613338199, 'n_test': 149646, 'n_picks': 18472, 'win_rate_of_picks': 0.46968385577201843, 'avg_return_of_picks': 0.16121110320091248}
+  {'auc': 0.7937483716526604, 'n_test': 154206, 'n_picks': 4951, 'win_rate_of_picks': 0.6134114265441895, 'avg_return_of_picks': 0.3779136836528778}
+  {'auc': 0.744807392918136, 'n_test': 164002, 'n_picks': 10679, 'win_rate_of_picks': 0.5836688876152039, 'avg_return_of_picks': 0.3608766794204712}
+  {'auc': 0.7522820823065646, 'n_test': 137234, 'n_picks': 12618, 'win_rate_of_picks': 0.5971627831459045, 'avg_return_of_picks': 0.6801925897598267}
 regressor folds:
-  {'mae': 0.10914040059176162, 'directional_accuracy': 0.38290775858063575, 'n_test': 301318}
-  {'mae': 0.09961616330408003, 'directional_accuracy': 0.41531381822830116, 'n_test': 312920}
-  {'mae': 0.15436615242812476, 'directional_accuracy': 0.4306245069248006, 'n_test': 333367}
-  {'mae': 0.2779682581941929, 'directional_accuracy': 0.4534042104804192, 'n_test': 275218}
+  {'mae': 0.2482363871176141, 'directional_accuracy': 0.9998941014508101, 'n_test': 28329}
+  {'mae': 0.2535736432702664, 'directional_accuracy': 1.0, 'n_test': 31620}
+  {'mae': 0.3685201518925222, 'directional_accuracy': 0.9997119438552386, 'n_test': 38187}
+  {'mae': 0.7076980595941853, 'directional_accuracy': 0.9999227719713741, 'n_test': 38846}
 
 === Horizon 3d (4 folds) ===
 classifier folds:
-  {'auc': 0.7906605148810322, 'n_test': 300981, 'n_picks': 51027, 'win_rate_of_picks': 0.5430654287338257, 'avg_return_of_picks': 0.24535666406154633}
-  {'auc': 0.7933444944452338, 'n_test': 312400, 'n_picks': 33902, 'win_rate_of_picks': 0.6202583909034729, 'avg_return_of_picks': 0.24584314227104187}
-  {'auc': 0.7431224754356442, 'n_test': 332567, 'n_picks': 30565, 'win_rate_of_picks': 0.6018321514129639, 'avg_return_of_picks': 0.33938974142074585}
-  {'auc': 0.7053565792794689, 'n_test': 248330, 'n_picks': 21206, 'win_rate_of_picks': 0.6641988158226013, 'avg_return_of_picks': 0.8356248140335083}
+  {'auc': 0.8060811239892197, 'n_test': 148913, 'n_picks': 16891, 'win_rate_of_picks': 0.6110946536064148, 'avg_return_of_picks': 0.3624705970287323}
+  {'auc': 0.7936304036458256, 'n_test': 153426, 'n_picks': 17033, 'win_rate_of_picks': 0.6402865052223206, 'avg_return_of_picks': 0.3233788311481476}
+  {'auc': 0.7253682118559249, 'n_test': 162654, 'n_picks': 15703, 'win_rate_of_picks': 0.6216009855270386, 'avg_return_of_picks': 0.4408954083919525}
+  {'auc': 0.7014748911553303, 'n_test': 135078, 'n_picks': 19448, 'win_rate_of_picks': 0.633689820766449, 'avg_return_of_picks': 0.8204876184463501}
 regressor folds:
-  {'mae': 0.18678976510201376, 'directional_accuracy': 0.40519501230974714, 'n_test': 300981}
-  {'mae': 0.17029716434975786, 'directional_accuracy': 0.4458290653008963, 'n_test': 312400}
-  {'mae': 0.2720532335836951, 'directional_accuracy': 0.4402150544100888, 'n_test': 332567}
-  {'mae': 0.7876646796307819, 'directional_accuracy': 0.4782426609753151, 'n_test': 248330}
+  {'mae': 0.36270421355599636, 'directional_accuracy': 0.9991073485372034, 'n_test': 34728}
+  {'mae': 0.33934662801664395, 'directional_accuracy': 0.9998760965455716, 'n_test': 40354}
+  {'mae': 0.6346465010446227, 'directional_accuracy': 0.9996955992346495, 'n_test': 45992}
+  {'mae': 1.556997185956968, 'directional_accuracy': 0.9999408529011652, 'n_test': 50721}
 
 === Horizon 7d (4 folds) ===
 classifier folds:
-  {'auc': 0.8036498705790154, 'n_test': 300663, 'n_picks': 83334, 'win_rate_of_picks': 0.5322317481040955, 'avg_return_of_picks': 0.2784511148929596}
-  {'auc': 0.7703042838999303, 'n_test': 311756, 'n_picks': 28199, 'win_rate_of_picks': 0.7109826803207397, 'avg_return_of_picks': 0.3607167601585388}
-  {'auc': 0.7080141090685836, 'n_test': 331497, 'n_picks': 29725, 'win_rate_of_picks': 0.5822708010673523, 'avg_return_of_picks': 0.40129798650741577}
-  {'auc': 0.6180797939410323, 'n_test': 200866, 'n_picks': 29898, 'win_rate_of_picks': 0.5551876425743103, 'avg_return_of_picks': 0.9843921065330505}
+  {'auc': 0.7956620766682644, 'n_test': 148014, 'n_picks': 19463, 'win_rate_of_picks': 0.6184041500091553, 'avg_return_of_picks': 0.5290991067886353}
+  {'auc': 0.7765850829773862, 'n_test': 152643, 'n_picks': 21139, 'win_rate_of_picks': 0.6496996283531189, 'avg_return_of_picks': 0.3436407744884491}
+  {'auc': 0.6882425332993941, 'n_test': 160285, 'n_picks': 18781, 'win_rate_of_picks': 0.5747830271720886, 'avg_return_of_picks': 0.348471999168396}
+  {'auc': 0.634267210771991, 'n_test': 134180, 'n_picks': 34744, 'win_rate_of_picks': 0.5987221002578735, 'avg_return_of_picks': 1.0148409605026245}
 regressor folds:
-  {'mae': 0.26819528781190327, 'directional_accuracy': 0.407170153959749, 'n_test': 300663}
-  {'mae': 0.2872704527500078, 'directional_accuracy': 0.4186703704178909, 'n_test': 311756}
-  {'mae': 0.4208862674313748, 'directional_accuracy': 0.4234125799026839, 'n_test': 331497}
-  {'mae': 1.4578256536623246, 'directional_accuracy': 0.5129788017882568, 'n_test': 200866}
+  {'mae': 0.5140414412240922, 'directional_accuracy': 0.9999219786221425, 'n_test': 38451}
+  {'mae': 0.43968551015768115, 'directional_accuracy': 0.9998679519345042, 'n_test': 45438}
+  {'mae': 1.0297812094379246, 'directional_accuracy': 0.9965075669383003, 'n_test': 48963}
+  {'mae': 2.3711227471136374, 'directional_accuracy': 1.0, 'n_test': 59427}
 
 === Horizon 14d (4 folds) ===
 classifier folds:
-  {'auc': 0.8078071569946423, 'n_test': 300368, 'n_picks': 131168, 'win_rate_of_picks': 0.45671963691711426, 'avg_return_of_picks': 0.2227940857410431}
-  {'auc': 0.7181282580299999, 'n_test': 310488, 'n_picks': 33871, 'win_rate_of_picks': 0.7147707343101501, 'avg_return_of_picks': 0.4602992832660675}
-  {'auc': 0.6578303726475768, 'n_test': 330115, 'n_picks': 38797, 'win_rate_of_picks': 0.5510219931602478, 'avg_return_of_picks': 0.41458287835121155}
-  {'auc': 0.5392508156547824, 'n_test': 121529, 'n_picks': 31982, 'win_rate_of_picks': 0.5728222131729126, 'avg_return_of_picks': 1.4891937971115112}
+  {'auc': 0.7945592252057134, 'n_test': 146415, 'n_picks': 24262, 'win_rate_of_picks': 0.5877503752708435, 'avg_return_of_picks': 0.49305129051208496}
+  {'auc': 0.7796507923248523, 'n_test': 151539, 'n_picks': 36536, 'win_rate_of_picks': 0.6277917623519897, 'avg_return_of_picks': 0.30007854104042053}
+  {'auc': 0.6277239190814476, 'n_test': 157273, 'n_picks': 28394, 'win_rate_of_picks': 0.5356413125991821, 'avg_return_of_picks': 0.28633958101272583}
+  {'auc': 0.5978529691591837, 'n_test': 133161, 'n_picks': 58685, 'win_rate_of_picks': 0.5890432000160217, 'avg_return_of_picks': 1.2534141540527344}
 regressor folds:
-  {'mae': 0.33490677281910713, 'directional_accuracy': 0.36714630053800673, 'n_test': 300368}
-  {'mae': 0.504314356838902, 'directional_accuracy': 0.44457756821519673, 'n_test': 310488}
-  {'mae': 0.663722242554213, 'directional_accuracy': 0.4429183769292519, 'n_test': 330115}
-  {'mae': 2.5964505373315445, 'directional_accuracy': 0.5952982415719704, 'n_test': 121529}
+  {'mae': 0.6317117765296785, 'directional_accuracy': 0.9997309803077585, 'n_test': 37172}
+  {'mae': 0.5003137570104043, 'directional_accuracy': 0.9993373094764745, 'n_test': 48288}
+  {'mae': 1.5590248688543122, 'directional_accuracy': 0.9972671329740473, 'n_test': 52326}
+  {'mae': 3.126631409991962, 'directional_accuracy': 0.9987585629244069, 'n_test': 66858}
 
 === Horizon 21d (4 folds) ===
 classifier folds:
-  {'auc': 0.8254424817723081, 'n_test': 299919, 'n_picks': 125728, 'win_rate_of_picks': 0.47573333978652954, 'avg_return_of_picks': 0.24410487711429596}
-  {'auc': 0.7186739008045945, 'n_test': 309372, 'n_picks': 49130, 'win_rate_of_picks': 0.736006498336792, 'avg_return_of_picks': 0.4865749478340149}
-  {'auc': 0.5919937558331377, 'n_test': 328203, 'n_picks': 61891, 'win_rate_of_picks': 0.524535059928894, 'avg_return_of_picks': 0.39071568846702576}
-  {'auc': 0.42772517380508457, 'n_test': 42983, 'n_picks': 12411, 'win_rate_of_picks': 0.6506325006484985, 'avg_return_of_picks': 2.8092024326324463}
+  {'auc': 0.765943954681491, 'n_test': 144910, 'n_picks': 27610, 'win_rate_of_picks': 0.4904020428657532, 'avg_return_of_picks': 0.2597843110561371}
+  {'auc': 0.7974169841670237, 'n_test': 150122, 'n_picks': 44774, 'win_rate_of_picks': 0.6259883046150208, 'avg_return_of_picks': 0.4366496503353119}
+  {'auc': 0.6211928471891768, 'n_test': 154952, 'n_picks': 17606, 'win_rate_of_picks': 0.6326252222061157, 'avg_return_of_picks': 0.47322118282318115}
+  {'auc': 0.5724215912887547, 'n_test': 131342, 'n_picks': 55382, 'win_rate_of_picks': 0.5942002534866333, 'avg_return_of_picks': 1.4744212627410889}
 regressor folds:
-  {'mae': 0.3795846184969352, 'directional_accuracy': 0.3616143025283493, 'n_test': 299919}
-  {'mae': 0.6941600349823057, 'directional_accuracy': 0.47482642255924906, 'n_test': 309372}
-  {'mae': 1.0212305141045066, 'directional_accuracy': 0.46297870525254187, 'n_test': 328203}
-  {'mae': 5.701748005246312, 'directional_accuracy': 0.6798036433008399, 'n_test': 42983}
+  {'mae': 0.6631070621179072, 'directional_accuracy': 0.9989744827170176, 'n_test': 33154}
+  {'mae': 0.67137738055387, 'directional_accuracy': 0.999391536056734, 'n_test': 47661}
+  {'mae': 1.9531984461716863, 'directional_accuracy': 0.9965949944690266, 'n_test': 57856}
+  {'mae': 3.518570046683625, 'directional_accuracy': 0.9974360094984194, 'n_test': 68643}
 
 === Horizon 30d (4 folds) ===
 classifier folds:
-  {'auc': 0.813114226143964, 'n_test': 299411, 'n_picks': 102617, 'win_rate_of_picks': 0.5652084946632385, 'avg_return_of_picks': 0.368868887424469}
-  {'auc': 0.6983462892927317, 'n_test': 308834, 'n_picks': 42564, 'win_rate_of_picks': 0.7263414859771729, 'avg_return_of_picks': 0.5399457216262817}
-  {'auc': 0.5857562068913493, 'n_test': 267354, 'n_picks': 81405, 'win_rate_of_picks': 0.6245930790901184, 'avg_return_of_picks': 1.245414137840271}
+  {'auc': 0.756928661712662, 'n_test': 143126, 'n_picks': 23438, 'win_rate_of_picks': 0.4962027370929718, 'avg_return_of_picks': 0.22056454420089722}
+  {'auc': 0.7867637929687612, 'n_test': 147992, 'n_picks': 50504, 'win_rate_of_picks': 0.564628541469574, 'avg_return_of_picks': 0.4141155481338501}
+  {'auc': 0.6347397117204175, 'n_test': 151756, 'n_picks': 15999, 'win_rate_of_picks': 0.6734796166419983, 'avg_return_of_picks': 0.6011984348297119}
+  {'auc': 0.5690096241108882, 'n_test': 128533, 'n_picks': 44587, 'win_rate_of_picks': 0.6057819724082947, 'avg_return_of_picks': 1.5008459091186523}
 regressor folds:
-  {'mae': 0.40049809087256977, 'directional_accuracy': 0.4146507643339757, 'n_test': 299411}
-  {'mae': 0.9875843098319085, 'directional_accuracy': 0.5128548022562283, 'n_test': 308834}
-  {'mae': 2.1343856711697415, 'directional_accuracy': 0.5453555959514351, 'n_test': 267354}
+  {'mae': 0.7109013477783713, 'directional_accuracy': 0.9975070485235198, 'n_test': 33695}
+  {'mae': 0.7906208680465672, 'directional_accuracy': 0.9992630967799563, 'n_test': 44782}
+  {'mae': 2.2874052679816623, 'directional_accuracy': 0.997251636892733, 'n_test': 61855}
+  {'mae': 3.7821812080070663, 'directional_accuracy': 0.9938036774453859, 'n_test': 69396}
 
 
 === Feature importances (top 15 by gain, per horizon classifier) ===
 
 --- clf_1d ---
-  vol_3d: 2626850.1
-  days_since_season_start: 781077.2
-  pct_of_range_3d: 368097.0
-  return_1d: 339952.5
-  squad: 309596.8
-  vol_7d: 303109.1
-  return_3d: 286028.4
-  price: 278899.1
-  day_of_week: 229818.6
-  pct_of_range_30d: 184193.4
-  pc_console_ratio: 159308.1
-  platform: 156743.5
-  return_7d: 134034.1
-  vol_14d: 108986.8
-  sma_3d: 101753.6
+  vol_3d: 2241287.3
+  days_since_season_start: 761082.8
+  pct_of_range_3d: 744551.7
+  return_1d: 341408.7
+  vol_7d: 317878.5
+  price: 299630.1
+  return_3d: 286622.9
+  squad: 270271.4
+  day_of_week: 245339.1
+  pct_of_range_30d: 173578.6
+  pc_console_ratio: 159933.5
+  platform: 157764.0
+  return_7d: 124578.9
+  season_progress_frac: 107381.3
+  sma_3d: 104803.3
 
 --- clf_3d ---
-  vol_3d: 2606356.7
-  days_since_season_start: 1658790.4
-  squad: 636973.1
-  vol_7d: 536976.7
-  pct_of_range_3d: 478073.3
-  return_3d: 434100.9
-  price: 409755.4
-  day_of_week: 270238.9
-  vol_14d: 215759.8
-  pc_console_ratio: 215459.4
-  platform: 215274.4
-  pct_of_range_30d: 184204.1
-  ema_slow: 149447.6
-  sma_30d: 127235.3
-  vol_30d: 120262.9
+  vol_3d: 2225043.6
+  days_since_season_start: 1453733.9
+  pct_of_range_3d: 724420.6
+  squad: 567997.8
+  return_3d: 474150.5
+  vol_7d: 470033.3
+  price: 432008.9
+  season_progress_frac: 308852.9
+  day_of_week: 286296.7
+  pct_of_range_7d: 225904.6
+  platform: 214009.6
+  pc_console_ratio: 206933.0
+  vol_14d: 193309.4
+  pct_of_range_30d: 166609.9
+  vol_30d: 129044.6
 
 --- clf_7d ---
-  days_since_season_start: 2851994.1
-  vol_3d: 1993495.4
-  squad: 1155875.6
-  vol_7d: 961195.4
-  price: 572449.9
-  ema_slow: 353995.1
-  platform: 264877.6
-  pct_of_range_3d: 220972.8
-  club: 204651.6
-  vol_30d: 193041.3
-  pc_console_ratio: 179331.8
-  vol_14d: 175298.4
-  rating: 170181.2
-  sma_7d: 166748.0
-  return_7d: 140340.3
+  days_since_season_start: 2579310.2
+  vol_3d: 1528239.0
+  vol_7d: 1178894.8
+  squad: 1120708.7
+  pct_of_range_3d: 538820.6
+  price: 503079.1
+  season_progress_frac: 439966.7
+  ema_slow: 268471.8
+  platform: 251991.8
+  sma_7d: 187345.4
+  pc_console_ratio: 179157.4
+  club: 176766.7
+  rating: 175790.8
+  vol_30d: 154255.7
+  vol_14d: 144495.6
 
 --- clf_14d ---
-  days_since_season_start: 3589762.1
-  squad: 1871938.5
-  pct_of_range_3d: 1082210.5
-  ema_slow: 1027585.9
-  price: 894071.3
-  vol_3d: 605871.0
-  club: 351343.8
-  vol_7d: 315866.2
-  platform: 293488.1
-  vol_21d: 266839.7
-  vol_30d: 232753.3
-  rating: 217684.0
-  band: 183725.6
-  return_30d: 165985.9
-  vol_14d: 162176.5
+  days_since_season_start: 3267561.6
+  squad: 1720881.4
+  pct_of_range_3d: 1031817.6
+  price: 813587.4
+  sma_14d: 676546.3
+  season_progress_frac: 649624.4
+  vol_3d: 578552.7
+  ema_slow: 452126.9
+  vol_7d: 331009.4
+  club: 328320.9
+  platform: 289329.2
+  vol_21d: 272956.4
+  vol_30d: 230520.7
+  band: 211436.1
+  rating: 194134.4
 
 --- clf_21d ---
-  days_since_season_start: 3801769.0
-  squad: 2246624.3
-  price: 1084588.5
-  ema_slow: 933455.5
-  sma_30d: 892768.9
-  club: 527403.1
-  vol_3d: 437263.7
-  vol_7d: 324617.9
-  platform: 315794.4
-  rating: 261435.4
-  sma_3d: 257485.7
-  sma_14d: 245370.7
-  vol_14d: 236914.1
-  vol_30d: 196411.4
-  band: 193908.9
+  days_since_season_start: 3386801.0
+  squad: 2062605.0
+  price: 990344.5
+  sma_30d: 987314.1
+  season_progress_frac: 690091.7
+  ema_slow: 600754.6
+  club: 473836.5
+  vol_3d: 470290.3
+  sma_14d: 413610.7
+  platform: 331721.4
+  vol_7d: 327290.8
+  sma_3d: 263257.3
+  vol_14d: 239370.5
+  rating: 239281.3
+  promo_family: 220816.6
 
 --- clf_30d ---
-  days_since_season_start: 3549860.0
-  squad: 2547673.1
-  price: 1293469.8
-  sma_21d: 1005246.1
-  ema_slow: 946830.5
-  club: 755611.1
-  vol_7d: 473672.2
-  platform: 358527.3
-  sma_3d: 327391.0
-  rating: 261124.4
-  sma_30d: 235348.0
-  band: 216235.3
-  vol_14d: 191086.2
-  zscore_30d: 171728.7
-  pc_console_ratio: 162615.9
+  days_since_season_start: 3193107.8
+  squad: 2383625.7
+  price: 1183472.0
+  sma_21d: 1088679.8
+  ema_slow: 870936.3
+  club: 659421.4
+  season_progress_frac: 625778.7
+  sma_3d: 380981.4
+  vol_7d: 380835.3
+  platform: 359684.1
+  promo_family: 323564.3
+  sma_14d: 294920.8
+  rating: 252967.6
+  band: 208501.3
+  vol_14d: 203211.8
