@@ -248,27 +248,33 @@ def load_snapshots_daily():
 
 # ---------------------------------------------------------------- technicals
 
-def build_price_technicals(prices):
-    df = prices.sort_values(KEYS + ["date"]).reset_index(drop=True)
+def _technicals_for_batch(df):
+    """Core computation for one batch -- called on a chunk that contains only
+    WHOLE (player_id, game_version, platform) groups (the caller never splits
+    a group's rows across chunks), so every rolling/return calculation here
+    is exactly as correct as running it on the full panel at once. The
+    groupby object is built ONCE per column family and reused -- building a
+    fresh one for every single column (the original approach) redid the full
+    group-sort machinery ~30 times over the same rows, which is both what
+    made the run slow and a real contributor to the OOM kill this caused
+    live on the VPS."""
+    gb_price = df.groupby(KEYS, sort=False)["price"]
+    gb_date = df.groupby(KEYS, sort=False)["date"]
 
-    def grouped(col):
-        return df.groupby(KEYS, sort=False)[col]
+    df["days_since_prev_point"] = gb_date.transform(lambda s: s.diff().dt.days).astype("float32")
 
-    prev_date = grouped("date").transform(lambda s: s.diff().dt.days)
-    df["days_since_prev_point"] = prev_date.astype("float32")
-
-    df["return_1d"] = grouped("price").transform(lambda s: s.pct_change(1)).astype("float32")
+    df["return_1d"] = gb_price.transform(lambda s: s.pct_change(1)).astype("float32")
     for h in HORIZONS:
         if h == 1:
             continue
-        df[f"return_{h}d"] = grouped("price").transform(lambda s: s.pct_change(h)).astype("float32")
+        df[f"return_{h}d"] = gb_price.transform(lambda s: s.pct_change(h)).astype("float32")
 
     for w in ROLL_WINDOWS:
         mp = max(2, w // 2)
-        roll_mean = grouped("price").transform(lambda s: s.rolling(w, min_periods=mp).mean())
-        roll_std = grouped("price").transform(lambda s: s.rolling(w, min_periods=mp).std())
-        roll_min = grouped("price").transform(lambda s: s.rolling(w, min_periods=mp).min())
-        roll_max = grouped("price").transform(lambda s: s.rolling(w, min_periods=mp).max())
+        roll_mean = gb_price.transform(lambda s: s.rolling(w, min_periods=mp).mean())
+        roll_std = gb_price.transform(lambda s: s.rolling(w, min_periods=mp).std())
+        roll_min = gb_price.transform(lambda s: s.rolling(w, min_periods=mp).min())
+        roll_max = gb_price.transform(lambda s: s.rolling(w, min_periods=mp).max())
         df[f"sma_{w}d"] = roll_mean.astype("float32")
         df[f"vol_{w}d"] = roll_std.astype("float32")
         df[f"zscore_{w}d"] = ((df["price"] - roll_mean) / roll_std).astype("float32")
@@ -281,24 +287,57 @@ def build_price_technicals(prices):
     vol_30d_pct = (df["vol_30d"] / df["sma_30d"].replace(0, np.nan))
     df["shock_score"] = (df["return_1d"] / vol_30d_pct.replace(0, np.nan)).astype("float32")
 
-    df["ema_fast"] = grouped("price").transform(lambda s: s.ewm(span=7, min_periods=3).mean()).astype("float32")
-    df["ema_slow"] = grouped("price").transform(lambda s: s.ewm(span=21, min_periods=5).mean()).astype("float32")
+    df["ema_fast"] = gb_price.transform(lambda s: s.ewm(span=7, min_periods=3).mean()).astype("float32")
+    df["ema_slow"] = gb_price.transform(lambda s: s.ewm(span=21, min_periods=5).mean()).astype("float32")
     df["macd"] = (df["ema_fast"] - df["ema_slow"]).astype("float32")
     df["macd_pct"] = (df["macd"] / df["ema_slow"].replace(0, np.nan)).astype("float32")
 
-    df["_delta"] = grouped("price").transform(lambda s: s.diff())
-    df["_gain"] = df["_delta"].clip(lower=0)
-    df["_loss"] = (-df["_delta"]).clip(lower=0)
+    delta = gb_price.transform(lambda s: s.diff())
+    df["_gain"] = delta.clip(lower=0)
+    df["_loss"] = (-delta).clip(lower=0)
     avg_gain = df.groupby(KEYS, sort=False)["_gain"].transform(lambda s: s.rolling(14, min_periods=5).mean())
     avg_loss = df.groupby(KEYS, sort=False)["_loss"].transform(lambda s: s.rolling(14, min_periods=5).mean())
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["rsi_14d"] = (100 - 100 / (1 + rs)).astype("float32")
-    df = df.drop(columns=["_delta", "_gain", "_loss"])
+    return df.drop(columns=["_gain", "_loss"])
+
+
+def build_price_technicals(prices, batch_size=4000):
+    """Batched by whole (player_id, game_version, platform) series so peak
+    memory stays bounded no matter how large this table grows over time (per
+    PROJECT.md there's no cleanup policy -- it only gets bigger). Confirmed
+    live: running this unbatched on the full 15.8M-row panel got OOM-killed
+    by the VPS partway through; processing ~4000 series at a time keeps each
+    chunk's working set small regardless of total data size."""
+    df = prices.sort_values(KEYS + ["date"]).reset_index(drop=True)
+    group_sizes = df.groupby(KEYS, sort=False).size()
+    boundaries = group_sizes.cumsum().to_numpy()
+    n_groups = len(group_sizes)
+    n_batches = max(1, -(-n_groups // batch_size))
+    log(f"  {n_groups} player/game/platform series, {len(df)} rows, "
+        f"{n_batches} batches of ~{batch_size} series each")
+
+    parts = []
+    start_row = 0
+    for i in range(n_batches):
+        end_group = min((i + 1) * batch_size, n_groups) - 1
+        end_row = int(boundaries[end_group])
+        chunk = df.iloc[start_row:end_row].copy()
+        parts.append(_technicals_for_batch(chunk))
+        start_row = end_row
+        del chunk
+        gc.collect()
+        if (i + 1) % 5 == 0 or i == n_batches - 1:
+            log(f"    batch {i + 1}/{n_batches} done ({end_row}/{len(df)} rows)")
+
+    result = pd.concat(parts, ignore_index=True)
+    del parts
+    gc.collect()
 
     # dozens of columns were added one at a time above -- consolidate the
     # underlying memory layout now rather than carrying that fragmentation
     # (and pandas' own PerformanceWarning about it) through every later merge
-    return df.copy()
+    return result.copy()
 
 
 def add_cross_platform_features(df):
