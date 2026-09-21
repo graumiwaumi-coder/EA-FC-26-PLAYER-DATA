@@ -307,8 +307,18 @@ def build_price_technicals(prices, batch_size=4000):
     memory stays bounded no matter how large this table grows over time (per
     PROJECT.md there's no cleanup policy -- it only gets bigger). Confirmed
     live: running this unbatched on the full 15.8M-row panel got OOM-killed
-    by the VPS partway through; processing ~4000 series at a time keeps each
-    chunk's working set small regardless of total data size."""
+    partway through; processing ~4000 series at a time keeps each chunk's
+    working set small regardless of total data size.
+
+    Each batch is written straight to disk and freed from memory immediately
+    rather than accumulated in a Python list -- confirmed live a second time:
+    holding all 15 batches in memory and THEN concatenating them (plus a
+    defragmentation .copy() afterward) needed roughly 3x the final size in
+    RAM all at once, which is what actually killed the run, right after the
+    very last batch finished. Reassembling from disk avoids ever holding
+    more than one batch's worth of extra memory at a time, and as a bonus
+    this step's (expensive) output survives even if a later step fails, so
+    it doesn't need to be recomputed from scratch on a retry."""
     df = prices.sort_values(KEYS + ["date"]).reset_index(drop=True)
     group_sizes = df.groupby(KEYS, sort=False).size()
     boundaries = group_sizes.cumsum().to_numpy()
@@ -317,27 +327,33 @@ def build_price_technicals(prices, batch_size=4000):
     log(f"  {n_groups} player/game/platform series, {len(df)} rows, "
         f"{n_batches} batches of ~{batch_size} series each")
 
-    parts = []
+    tmp_dir = DATA_DIR / "_tmp_technicals"
+    tmp_dir.mkdir(exist_ok=True)
+    for old in tmp_dir.glob("*.parquet"):
+        old.unlink()
+
     start_row = 0
     for i in range(n_batches):
         end_group = min((i + 1) * batch_size, n_groups) - 1
         end_row = int(boundaries[end_group])
         chunk = df.iloc[start_row:end_row].copy()
-        parts.append(_technicals_for_batch(chunk))
+        batch_result = _technicals_for_batch(chunk)
+        batch_result.to_parquet(tmp_dir / f"part_{i:03d}.parquet", index=False)
         start_row = end_row
-        del chunk
+        del chunk, batch_result
         gc.collect()
         if (i + 1) % 5 == 0 or i == n_batches - 1:
             log(f"    batch {i + 1}/{n_batches} done ({end_row}/{len(df)} rows)")
 
-    result = pd.concat(parts, ignore_index=True)
-    del parts
+    del df
     gc.collect()
 
-    # dozens of columns were added one at a time above -- consolidate the
-    # underlying memory layout now rather than carrying that fragmentation
-    # (and pandas' own PerformanceWarning about it) through every later merge
-    return result.copy()
+    log("  reassembling batches from disk...")
+    result = pd.read_parquet(tmp_dir)
+    for old in tmp_dir.glob("*.parquet"):
+        old.unlink()
+    tmp_dir.rmdir()
+    return result
 
 
 def add_cross_platform_features(df):
@@ -377,7 +393,7 @@ def add_cross_platform_features(df):
         df["platform"] == "pc", df["console_return_1d_prevday"], df["pc_return_1d_prevday"]
     ).astype("float32")
     df = df.drop(columns=["console_return_1d_prevday", "pc_return_1d_prevday"])
-    return df.copy()
+    return df
 
 
 def add_relative_strength(df, indices_daily):
@@ -401,7 +417,7 @@ def add_relative_strength(df, indices_daily):
             df[f"rel_strength_own_{h}d"] = (df[ret_col] - df[own_col]).astype("float32")
         if all_col in df.columns:
             df[f"rel_strength_all_{h}d"] = (df[ret_col] - df[all_col]).astype("float32")
-    return df.copy()
+    return df
 
 
 def add_cross_sectional(df):
@@ -438,7 +454,7 @@ def add_labels(df):
         df[f"label_return_{h}d"] = ret.astype("float32")
         win = np.where(ret.isna(), np.nan, (ret > WIN_BREAKEVEN).astype(float))
         df[f"label_win_{h}d"] = win.astype("float32")
-    return df.copy()
+    return df
 
 
 def main():
