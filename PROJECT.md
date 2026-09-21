@@ -151,6 +151,44 @@ fix mechanically.
   expect to walk through commands step by step, confirming output at each
   stage, the same way this session operated.
 
+## Watching the scraper live (for solving a captcha)
+
+The dashboard's "Refresh market data" button runs `scrape_player_history.py`
+against a PERSISTENT virtual display (`DISPLAY=:99`), not a throwaway one
+(`xvfb-run` was the original approach -- it spins up and tears down its own
+display per run, which can't be watched or clicked into from outside). A
+one-time setup makes that persistent display viewable/interactive in any
+browser via noVNC, so if futbin shows a captcha/bot-check mid-scrape, a
+person can actually see it and click through instead of the run just
+silently finding 0 players (this happened for real on 2026-09-21).
+
+**One-time setup on the VPS** (install once, then leave the three processes
+running in tmux permanently -- they don't need to be restarted between
+scrapes, only if the VPS itself reboots):
+
+```bash
+apt install -y xvfb x11vnc novnc websockify
+x11vnc -storepasswd            # pick a VNC password when prompted -- keep it out of git/chat
+
+tmux new -s xvfb
+Xvfb :99 -screen 0 1920x1080x24
+# Ctrl+B, D to detach
+
+tmux new -s x11vnc
+x11vnc -display :99 -forever -rfbauth ~/.vnc/passwd -rfbport 5900
+# Ctrl+B, D to detach
+
+tmux new -s novnc
+websockify --web=/usr/share/novnc/ 6080 localhost:5900
+# Ctrl+B, D to detach
+```
+
+After that, the dashboard's "Watch scrape live" link
+(`http://173.249.46.127:6080/vnc.html`) shows exactly what the scraper's
+Chrome window is doing in real time, and asks for the VNC password before
+connecting. Firewall note: port 6080 needs to be reachable the same way
+8501 (the dashboard itself) already is.
+
 ## How the new chat should start
 
 **Do not start coding immediately.** Propose a rebuild plan first — what

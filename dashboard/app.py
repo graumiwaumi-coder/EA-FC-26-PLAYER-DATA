@@ -77,8 +77,17 @@ st.title("FC27 Live Trading")
 # as a separate manual step. "Rebuild features & rescore" re-derives
 # features/predictions from whatever's already scraped, without spending
 # time on a fresh scrape (e.g. after a bankroll change or a code fix).
+#
+# DISPLAY=:99 (not `xvfb-run -a`, which spins up a throwaway virtual
+# display per invocation and tears it down after) targets a PERSISTENT
+# virtual display that a one-time VPS setup step leaves running under
+# x11vnc + noVNC -- see the "Watch scrape live" section below. That's what
+# lets a captcha/challenge Chrome hits mid-scrape actually be seen and
+# clicked through by a person, instead of failing silently inside a
+# display nobody can see.
+NOVNC_PORT = 6080
 REFRESH_CMD = ["bash", "-c",
-    "cd scraper && xvfb-run -a python3 scrape_player_history.py && "
+    "cd scraper && DISPLAY=:99 python3 scrape_player_history.py && "
     "cd ../analysis && python3 -u build_live_dataset.py && "
     "python3 -u build_features.py && "
     "python3 -u score_predictions.py"]
@@ -118,6 +127,21 @@ with col3:
     else:
         st.caption("No job currently running. Model retraining runs separately, "
                    "on its own Wed/Sun schedule (see PROJECT.md) -- not a button here.")
+
+host = st.get_option("server.address") or "173.249.46.127"
+if host in ("0.0.0.0", "localhost", "127.0.0.1"):
+    host = "173.249.46.127"
+novnc_url = f"http://{host}:{NOVNC_PORT}/vnc.html?autoconnect=true&resize=remote"
+
+if job is not None and job["job_name"] == "refresh_market_data":
+    st.warning(f"A scrape is running -- if futbin shows a captcha/challenge partway through, it "
+               f"will otherwise fail silently. [**Open the live browser view**]({novnc_url}) in a "
+               f"new tab to watch it and click through a captcha if one appears. Requires the "
+               f"one-time VNC setup (see PROJECT.md) to have been done on the VPS already.")
+else:
+    with st.expander("Watch scrape live (for solving a captcha)"):
+        st.caption(f"Only shows anything useful while 'Refresh market data' is actively running. "
+                   f"Link: {novnc_url}")
 
 if job is not None:
     with st.expander("Live log", expanded=True):
