@@ -43,6 +43,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 USER_DATA = SCRIPT_DIR / "chrome_profile"
 SCRAPES_DIR = SCRIPT_DIR / "scrapes"
 SCRAPES_DIR.mkdir(exist_ok=True)
+BLACKLIST_PATH = SCRIPT_DIR.parent / "data" / "no_market_blacklist.json"
 
 BASE = "https://www.futbin.com"
 POPULAR_URL = f"{BASE}/27/popular"
@@ -304,6 +305,22 @@ def load_index_movers():
     return players
 
 
+def load_no_market_blacklist():
+    """Players confirmed (data/no_market_blacklist.json, rebuilt every merge by
+    build_live_dataset.py) to have never once shown a real price on futbin --
+    SBC/reward-only cards with no market at all. Skipping them here saves a
+    full scrape cycle on cards that can never be traded; a card that later
+    starts trading automatically drops off this list on the next merge, so
+    it's re-loaded fresh every run rather than being a permanent exclusion."""
+    if not BLACKLIST_PATH.exists():
+        return set()
+    try:
+        records = json.loads(BLACKLIST_PATH.read_text())
+    except Exception:
+        return set()
+    return {r["player_id"] for r in records if r.get("game_version") == "fc27"}
+
+
 def load_player_universe():
     players = {}
     path = latest_market_list_file()
@@ -423,6 +440,11 @@ async def main():
     except Exception as e:
         print(f"WARNING: /27/popular fetch failed ({str(e)[:80]}) -- "
               f"continuing with just the market-list players")
+    blacklist = load_no_market_blacklist()
+    if blacklist:
+        before = len(players)
+        players = {pid: slug for pid, slug in players.items() if pid not in blacklist}
+        print(f"Skipping {before - len(players)} known no-market players (blacklist)")
     print(f"Total unique players to fetch: {len(players)}")
 
     if not players:

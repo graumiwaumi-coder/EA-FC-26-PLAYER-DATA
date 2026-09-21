@@ -65,6 +65,8 @@ PRICES_LONG_PATH = DATA_DIR / "prices_long.parquet"
 LIVE_SNAPSHOTS_PATH = DATA_DIR / "live_snapshots.parquet"
 SALES_HISTORY_PATH = DATA_DIR / "sales_history.parquet"
 MARKET_INDICES_PATH = DATA_DIR / "market_indices.parquet"
+NO_MARKET_BLACKLIST_PATH = DATA_DIR / "no_market_blacklist.json"
+MIN_POINTS_FOR_BLACKLIST = 5
 
 
 def parse_money(s):
@@ -418,6 +420,72 @@ def merge_market_indices():
               f"({len(new_df) - len(truly_new)} were already present)")
 
 
+# ---------------------------------------------------------------- stream 5
+def compute_no_market_blacklist():
+    """A player is 'no-market' if we've NEVER once seen a real price for them --
+    not a current live price, not a single nonzero point in their historical
+    price-history array, not a single real sale (FC27 only; sales_history isn't
+    collected for FC26 at all). Confirmed live 2026-09-21 by cross-checking
+    futbin.com directly on several examples: this correctly separates
+    permanently untradeable reward/SBC cards (e.g. a "Hall of FUT" version with
+    a genuinely empty price box on the site, zero everywhere in our data too)
+    from real tradeable cards that just happen to have an early zero-price day
+    (e.g. an Icon whose market hadn't set a price yet the first time we scraped
+    it, but has a real current price and real sales now).
+
+    Require at least MIN_POINTS_FOR_BLACKLIST history points before flagging --
+    FC27 is brand new and drops promo cards weekly, so a card with only 1-2
+    points so far might just be too new to have traded yet, not permanently
+    dead. Recomputed fresh every merge (not a fixed list): a card that starts
+    trading later automatically comes off this list on the next run.
+
+    Written to data/no_market_blacklist.json so the per-player scrapers can
+    skip these players next run (saves a full scrape cycle on cards that can
+    never be traded) and Stage 2 feature engineering can exclude them from the
+    buy/sell candidate pool -- the raw historical rows are left untouched."""
+    if not PLAYERS_PATH.exists() or not PRICES_LONG_PATH.exists():
+        return
+
+    players_df = pd.read_parquet(PLAYERS_PATH)
+    prices_df = pd.read_parquet(PRICES_LONG_PATH)
+    players_df = ensure_game_version_column(players_df, "fc26")
+    prices_df = ensure_game_version_column(prices_df, "fc26")
+
+    current_price = pd.to_numeric(players_df.get("current_price"), errors="coerce")
+    lookup = players_df[["id", "game_version"]].copy().rename(columns={"id": "player_id"})
+    lookup["has_current"] = (current_price.fillna(0) > 0).values
+
+    price_stats = prices_df.groupby(["player_id", "game_version"])["price"].agg(
+        n_points="count", n_nonzero=lambda s: (s > 0).sum()
+    ).reset_index()
+
+    merged = lookup.merge(price_stats, on=["player_id", "game_version"], how="left")
+    merged["n_points"] = merged["n_points"].fillna(0)
+    merged["n_nonzero"] = merged["n_nonzero"].fillna(0)
+
+    if SALES_HISTORY_PATH.exists():
+        sales_df = pd.read_parquet(SALES_HISTORY_PATH)
+        sales_counts = sales_df.groupby("player_id").size().rename("n_sales").reset_index()
+        merged = merged.merge(sales_counts, on="player_id", how="left")
+        merged["n_sales"] = merged["n_sales"].fillna(0)
+        # sales_history is FC27-only -- never let an FC26 id's sales count
+        # (which can't exist) accidentally suppress a flag via a stray join match
+        merged.loc[merged["game_version"] != "fc27", "n_sales"] = 0
+    else:
+        merged["n_sales"] = 0
+
+    enough_history = merged["n_points"] >= MIN_POINTS_FOR_BLACKLIST
+    never_priced = (~merged["has_current"]) & (merged["n_nonzero"] == 0) & (merged["n_sales"] == 0)
+    blacklist = merged[enough_history & never_priced][["player_id", "game_version"]]
+
+    records = blacklist.to_dict("records")
+    NO_MARKET_BLACKLIST_PATH.write_text(json.dumps(records))
+    by_gv = blacklist["game_version"].value_counts().to_dict()
+    print(f"[no_market_blacklist] {len(records)} players confirmed never-priced "
+          f"(>= {MIN_POINTS_FOR_BLACKLIST} history points, still 0 everywhere) -- "
+          f"{by_gv} -> {NO_MARKET_BLACKLIST_PATH}")
+
+
 def archive_processed_files():
     """Move raw scrape files out of scraper/scrapes/ once they're merged in,
     so the NEXT run's glob doesn't re-read (and re-hold-in-memory) every
@@ -444,6 +512,7 @@ def main():
     merge_live_snapshots()
     merge_sales_history()
     merge_market_indices()
+    compute_no_market_blacklist()
     archive_processed_files()
 
 
