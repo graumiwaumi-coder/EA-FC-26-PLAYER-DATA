@@ -32,9 +32,16 @@ trade usually still recovers most of its value). "a" is computed once per
 horizon at train time from real historical losses and stored in
 meta.json. Full Kelly is known to be high-variance in practice; a 0.75x
 fractional multiplier is used as "aggressive but not reckless" for the
-stated risk tolerance, with a per-position cap and a portfolio-level
-rescale so the whole BUY list never asks for more coins than are in the
-bankroll.
+stated risk tolerance, with a per-position cap (see size_positions()).
+Each row is sized independently against the FULL bankroll -- the buy list
+is a menu to pick from, not a portfolio pre-allocated across every row
+shown, so sizing is never diluted by how many other cards also cleared
+the confidence bar. Predicted returns are also capped (MAX_REALISTIC_RETURN)
+before they drive ranking or sizing, since a card with almost no real
+price history -- true of every FC27 card in its first couple of weeks --
+can make the regressor extrapolate into triple-digit "returns" that
+aren't a real trading edge, just noise from launch-week price corrections
+in the FC26 training data.
 
 Run: python3 score_predictions.py [--bankroll 15000]
 (bankroll is optional -- omit it to reuse whatever was last saved, either
@@ -69,7 +76,13 @@ CONFIDENCE_BAR = 0.60           # minimum win probability to appear on the BUY l
 SELL_WIN_PROB_THRESHOLD = 0.50  # a held card whose best remaining horizon can't clear this -> SELL
 KELLY_MULTIPLIER = 0.75         # fractional Kelly -- "aggressive" without full-Kelly's blowup risk
 MAX_POSITION_FRACTION = 0.25    # no single card eats more than this share of bankroll
-MAX_TOTAL_DEPLOYMENT = 1.0      # the whole BUY list's sizing is rescaled to fit inside 1x bankroll
+MAX_REALISTIC_RETURN = 1.0      # predicted returns are clipped here before ranking/sizing -- a
+                                 # brand-new card with almost no price history (everything right
+                                 # now, FC27 being 5 days old) can make the regressor extrapolate
+                                 # into triple/quadruple-digit "returns" it learned from FC26
+                                 # launch-week corrections; those aren't real trading edges, and
+                                 # left uncapped they'd both dominate the ranking (via
+                                 # effective_daily_return) and blow up the Kelly fraction.
 LIQUIDITY_WINDOW_DAYS = 14
 MIN_HISTORY_POINTS = 10         # fewer real PC/FC27 price points than this -> "thin_history" flag
 TOP_RATIONALE_N = 5             # only the top N buy picks get a written rationale, to save compute
@@ -137,8 +150,14 @@ def apply_blacklist(df, blacklist):
 
 
 def latest_snapshot(df):
-    idx = df.groupby("player_id")["date"].idxmax()
-    return df.loc[idx].reset_index(drop=True)
+    """The most recent row per player that actually has a known price --
+    a row can exist for a date with price=NaN (a scrape gap on that exact
+    day), and picking that as "the" current row would recommend a card at
+    an unknown price, which isn't actionable. Preferring the latest PRICED
+    row means price_at_snapshot is always real."""
+    priced = df[df["price"].notna()]
+    idx = priced.groupby("player_id")["date"].idxmax()
+    return priced.loc[idx].reset_index(drop=True)
 
 
 def attach_urls(latest):
@@ -219,6 +238,9 @@ def predict_all_horizons(df, feature_cols, models, meta):
     for h, m in models.items():
         win_prob = np.asarray(m["clf"].predict(X), dtype="float64")
         exp_return = np.asarray(m["reg"].predict(X), dtype="float64")
+        # see MAX_REALISTIC_RETURN -- guards against the regressor
+        # extrapolating wildly on cards with almost no real price history
+        exp_return = np.clip(exp_return, None, MAX_REALISTIC_RETURN)
         preds[h] = (win_prob, exp_return)
     return preds
 
@@ -288,6 +310,19 @@ def kelly_fraction(p, b, a):
 
 
 def size_positions(buy, loss_mags, bankroll):
+    """Each row is sized independently against the FULL bankroll, capped at
+    MAX_POSITION_FRACTION per card -- "if you buy this one, here's how much
+    to put on it." This does NOT assume you'll buy every card shown (the
+    confidence-bar list can easily run to 100+ rows); it's a menu you pick
+    from, not a portfolio pre-allocated across everything on the page. An
+    earlier version rescaled every position down so the WHOLE displayed
+    list summed to <=1x bankroll, which silently collapsed every single
+    recommended_quantity to 0 whenever more than a handful of cards
+    cleared the confidence bar -- exactly what happened on the first real
+    run. If you go through and buy several of these one after another,
+    your bankroll number in the dashboard is what you update between
+    picks (rerunning re-sizes everything left against what's actually
+    still available), not something this function tracks for you."""
     if buy.empty:
         buy = buy.copy()
         buy["kelly_fraction"] = pd.Series(dtype="float64")
@@ -300,10 +335,6 @@ def size_positions(buy, loss_mags, bankroll):
     raw_f = kelly_fraction(buy["predicted_win_prob"].to_numpy(),
                             buy["predicted_return_pct"].to_numpy(), a)
     raw_f = np.minimum(raw_f * KELLY_MULTIPLIER, MAX_POSITION_FRACTION)
-
-    total = raw_f.sum()
-    if total > MAX_TOTAL_DEPLOYMENT:
-        raw_f = raw_f * (MAX_TOTAL_DEPLOYMENT / total)
 
     buy["kelly_fraction"] = raw_f
     coins_allocated = raw_f * bankroll
