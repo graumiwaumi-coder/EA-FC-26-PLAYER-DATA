@@ -64,6 +64,7 @@ PLAYERS_PATH = DATA_DIR / "players.parquet"
 PRICES_LONG_PATH = DATA_DIR / "prices_long.parquet"
 LIVE_SNAPSHOTS_PATH = DATA_DIR / "live_snapshots.parquet"
 SALES_HISTORY_PATH = DATA_DIR / "sales_history.parquet"
+MARKET_INDICES_PATH = DATA_DIR / "market_indices.parquet"
 
 
 def parse_money(s):
@@ -365,6 +366,58 @@ def merge_sales_history():
           f"{len(new_df) - (len(combined) - len(existing))} were re-scrapes of sales we already had)")
 
 
+# ---------------------------------------------------------------- stream 4
+def merge_market_indices():
+    """market_indices_*.jsonl (scrape_market_indices.py -- one daily-price
+    array per rating-tier index x platform per run) -> reshaped to one row
+    per (index, platform, date) and appended to market_indices.parquet,
+    same dedup-by-date pattern as the player price-history stream."""
+    records = list(read_jsonl_files("market_indices_*.jsonl"))
+    if not records:
+        print("[market_indices] no market_indices_*.jsonl files found, skipping")
+        return
+
+    rows = []
+    for rec in records:
+        index_name = rec.get("index")
+        platform = rec.get("platform")
+        for point in rec.get("data") or []:
+            if len(point) != 2:
+                continue
+            ts, price = point
+            rows.append((index_name, platform, ts, price))
+
+    if not rows:
+        print("[market_indices] no data points found in any run")
+        return
+
+    new_df = pd.DataFrame(rows, columns=["index_tier", "platform", "ts_ms", "price"])
+    new_df["date"] = pd.to_datetime(new_df["ts_ms"], unit="ms")
+    new_df = new_df.drop(columns=["ts_ms"]).drop_duplicates(
+        subset=["index_tier", "platform", "date"]
+    )
+
+    if MARKET_INDICES_PATH.exists():
+        existing = pd.read_parquet(MARKET_INDICES_PATH)
+    else:
+        existing = pd.DataFrame(columns=["index_tier", "platform", "date", "price"])
+
+    existing_keys = existing[["index_tier", "platform", "date"]].drop_duplicates()
+    merged_keys = new_df.merge(
+        existing_keys, on=["index_tier", "platform", "date"],
+        how="left", indicator=True,
+    )
+    truly_new = new_df[merged_keys["_merge"].values == "left_only"]
+
+    if truly_new.empty:
+        print(f"[market_indices] {len(new_df)} index points scraped, all already present -- 0 new")
+    else:
+        combined = pd.concat([existing, truly_new], ignore_index=True)
+        combined.to_parquet(MARKET_INDICES_PATH, index=False)
+        print(f"[market_indices] market_indices.parquet: +{len(truly_new)} new index points "
+              f"({len(new_df) - len(truly_new)} were already present)")
+
+
 def archive_processed_files():
     """Move raw scrape files out of scraper/scrapes/ once they're merged in,
     so the NEXT run's glob doesn't re-read (and re-hold-in-memory) every
@@ -375,7 +428,8 @@ def archive_processed_files():
     the durable record from here on; the raw jsonl served its purpose."""
     PROCESSED_DIR.mkdir(exist_ok=True)
     moved = 0
-    for pattern in ("market_list_*.jsonl", "player_history_*.jsonl", "player_sales_*.jsonl"):
+    for pattern in ("market_list_*.jsonl", "player_history_*.jsonl", "player_sales_*.jsonl",
+                     "market_indices_*.jsonl"):
         for path in glob.glob(str(SCRAPES_DIR / pattern)):
             p = Path(path)
             p.rename(PROCESSED_DIR / p.name)
@@ -389,6 +443,7 @@ def main():
     merge_player_history()
     merge_live_snapshots()
     merge_sales_history()
+    merge_market_indices()
     archive_processed_files()
 
 
