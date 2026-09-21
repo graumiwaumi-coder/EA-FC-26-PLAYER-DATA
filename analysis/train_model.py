@@ -86,18 +86,26 @@ def split_columns(all_cols):
 
 
 def load_training_data():
+    """Confirmed live: loading all columns and THEN filtering to rating >=
+    MIN_RATING in pandas got the process killed (OOM) -- filtering after
+    load never actually reduces peak memory, since every excluded row was
+    already fully materialized by that point. Passing `filters=` to
+    read_parquet pushes the rating filter into the parquet read itself, so
+    the ~70% of rows below Gold+ never get loaded into memory at all.
+    (player_id was dropped from load_cols entirely -- it's carried through
+    build_features.py for bookkeeping/joins but nothing here actually uses
+    it as a feature or for splitting, so there's no reason to load it.)"""
     schema = pq.ParquetFile(str(FEATURE_PANEL_PATH)).schema_arrow
     all_cols = [f.name for f in schema]
     feature_cols, label_cols = split_columns(all_cols)
-    load_cols = list(dict.fromkeys(["player_id", "date", "rating"] + feature_cols + label_cols))
+    load_cols = list(dict.fromkeys(["date", "rating"] + feature_cols + label_cols))
 
-    log(f"Loading {len(load_cols)} of {len(all_cols)} columns from {FEATURE_PANEL_PATH}...")
-    df = pd.read_parquet(FEATURE_PANEL_PATH, columns=load_cols)
-    log(f"  {len(df)} rows loaded")
-
-    before = len(df)
-    df = df[df["rating"] >= MIN_RATING].reset_index(drop=True)
-    log(f"  rating >= {MIN_RATING} filter: {before} -> {len(df)} rows")
+    log(f"Loading {len(load_cols)} of {len(all_cols)} columns from {FEATURE_PANEL_PATH}, "
+        f"filtered to rating >= {MIN_RATING} at read time...")
+    df = pd.read_parquet(
+        FEATURE_PANEL_PATH, columns=load_cols, filters=[("rating", ">=", MIN_RATING)],
+    )
+    log(f"  {len(df)} rows loaded (already rating-filtered)")
 
     return df, feature_cols, label_cols
 
